@@ -109,8 +109,8 @@ The ffmpeg is configured to use the repo copy only.
 
 # 🚀 Usage
 
-1. Install AutoHotkey v2
-2. Extract ffmpeg into the same directory as the script 
+1. Install `AutoHotkey v2`
+2. Extract `ffmpeg` into the same directory as the script 
 3. Run `Nastarxa Image Combiner.ahk`
 4. Add images or folders
 5. Adjust exposure, FPS, size, and output format
