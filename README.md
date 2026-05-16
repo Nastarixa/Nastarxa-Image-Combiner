@@ -2,10 +2,16 @@
 
 A desktop image-sequence combiner built with AutoHotkey v2 for quickly turning image folders or MP4 clips into animations, videos, GIFs, and contact sheets.
 
-Designed for animation workflows, frame previews, exposure timing, and fast local rendering using the bundled `ffmpeg`.
+Designed for animation workflows, frame previews, exposure timing, and fast local rendering using `ffmpeg`.
 
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![Language](https://img.shields.io/badge/language-AutoHotkey_v2-green)
+
+---
+
+## 🖼 Image Preview
+
+![1](docs/images/1.png)
 
 ---
 
@@ -88,7 +94,7 @@ animation_sheet02.png
 
 No external installation for `ffmpeg` required.
 
-This repository already includes a bundled local runtime and the application is configured to use the repo copy only.
+The application is configured to use the repo copy only.
 
 ---
 
@@ -128,6 +134,7 @@ This repository already includes a bundled local runtime and the application is 
 * Avoids the common `auto_alt_ref` transparency issue
 * Output files are generated in the selected output folder
 * Works fully offline using local tools only
+* Download and extract ffmpeg into the same directory as the script before running the application
 
 ---
 
