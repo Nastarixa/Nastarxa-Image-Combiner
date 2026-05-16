@@ -91,10 +91,9 @@ animation_sheet02.png
 
 * Windows
 * AutoHotkey v2
+* ffmpeg
 
-No external installation for `ffmpeg` required.
-
-The application is configured to use the repo copy only.
+The ffmpeg is configured to use the repo copy only.
 
 ---
 
