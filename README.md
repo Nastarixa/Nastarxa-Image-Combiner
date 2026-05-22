@@ -63,7 +63,7 @@ Each row supports:
 
 | Field   | Description          |
 | ------- | -------------------- |
-| `Use`   | Enable / disable row |
+| `Active`| Enable / disable row |
 | `Layer` | Layer assignment     |
 | `Type`  | Timing type          |
 | `Cell`  | Cell number          |
