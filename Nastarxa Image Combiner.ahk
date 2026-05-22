@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Force
 TraySetIcon "Combiner.ico"
 
@@ -13,6 +13,13 @@ _cancelGenerate := false
 _lastPrepareError := ""
 _ffmpegEncoderCache := Map()
 _previewCacheDir := A_Temp "\NastarxaIC_preview"
+_timesheetLayers := []
+_undoStack := []
+_redoStack := []
+_MAX_UNDO := 10
+_isHistoryReplay := false
+_activeTimesheetGui := ""
+
 OnExit((*) => CleanupTemp())
 
 BuildGui()
@@ -132,14 +139,19 @@ BuildGui() {
 
     g.lv := g.AddListView(
         "x14 y68 w740 h502 Multi BackgroundFFFFFF c000000 Grid",
-        ["#", "File", "Exp", "Note"]
+        ["#", "File", "Exp", "Note", "Layer", "Cell", "Start", "End", "TS Dur"]
     )
     EnableListViewDoubleBuffer(g.lv)
 
     g.lv.ModifyCol(1, 35)
-    g.lv.ModifyCol(2, 460)
-    g.lv.ModifyCol(3, 65)
-    g.lv.ModifyCol(4, 160)
+    g.lv.ModifyCol(2, 250)
+    g.lv.ModifyCol(3, 50)
+    g.lv.ModifyCol(4, 100)
+    g.lv.ModifyCol(5, 72)
+    g.lv.ModifyCol(6, 48)
+    g.lv.ModifyCol(7, 52)
+    g.lv.ModifyCol(8, 52)
+    g.lv.ModifyCol(9, 58)
 
     ; -------------------------
     ; Exposure
@@ -281,6 +293,14 @@ BuildGui() {
     g.chkTimestamp := g.AddCheckbox(
         "x" rx+166 " y146 w90 cFFFFFF",
         "+time"
+    )
+    g.chkTimesheet := g.AddCheckbox(
+        "x" rx+244 " y146 w46 cFFFFFF",
+        "TS"
+    )
+    g.btnTimesheet := g.AddButton(
+        "x" rx+292 " y144 w68 h24",
+        "Setup..."
     )
 
     ; -------------------------
@@ -449,6 +469,7 @@ BuildGui() {
     g.btnSave.OnEvent("Click", (*) => SaveProject(g))
     g.btnLoad.OnEvent("Click", (*) => LoadProject(g))
     g.btnGuide.OnEvent("Click", (*) => ShowGuide())
+    g.btnTimesheet.OnEvent("Click", (*) => ShowTimesheetSetup(g))
 
     g.lv.OnEvent("Click", (lv, row) => SelectRow(g, row))
     g.lv.OnEvent("DoubleClick", (lv, row) => SelectRow(g, row))
@@ -485,6 +506,7 @@ BuildGui() {
     g.chkWebM.OnEvent("Click", (*) => g.Progress.Value := 0)
     g.chkPNG.OnEvent("Click", (*) => g.Progress.Value := 0)
     g.chkSheet.OnEvent("Click", (*) => g.Progress.Value := 0)
+    g.chkTimesheet.OnEvent("Click", (*) => ToggleTimesheetMode(g))
 
     g.btnBrowse.OnEvent("Click", (*) => BrowseOutputDir(g))
     g.btnAudio.OnEvent("Click", (*) => PickAudio(g))
@@ -503,13 +525,19 @@ BuildGui() {
     ; SHOW
     ; =========================================================
 
-    g.Show("Hide w1180 h650 Center")
+    g.Show("Hide w1180 h680 Center")
 
     HotIfWinActive("ahk_id " g.Hwnd)
     Hotkey("Delete", (*) => RemoveSelected(g))
+    Hotkey("*^z", (*) => (CommitActiveTimesheetPending(true), UndoAction(g)))
+    Hotkey("*^+z", (*) => (CommitActiveTimesheetPending(true), RedoAction(g)))
+    Hotkey("~Enter", (*) => CommitTimesheetEditorEnter())
+    Hotkey("~NumpadEnter", (*) => CommitTimesheetEditorEnter())
     HotIfWinActive()
 
     ApplyLayout(g, 1180, 680)
+    g.btnTimesheet.Enabled := g.chkTimesheet.Value = 1
+    ApplyTimesheetModeUI(g)
     g.Show()
 
     return g
@@ -521,6 +549,7 @@ DropFiles(g, files) {
         return
     addedRows := []
     len := files.Length
+    PushUndoState(g)
     BeginListUpdate(g)
     try {
         loop len {
@@ -569,6 +598,7 @@ OnAddImages(g) {
         return
     g.Progress.Value := 0
     addedRows := []
+    PushUndoState(g)
     BeginListUpdate(g)
     try {
         for f in files
@@ -592,6 +622,7 @@ OnAddFolder(g) {
         return
     g.Progress.Value := 0
     addedRows := []
+    PushUndoState(g)
     BeginListUpdate(g)
     try {
         for f in files
@@ -633,6 +664,197 @@ SortPathsNaturally(paths) {
     return sorted
 }
 
+GetTimesheetLayerOptions() {
+    global _timesheetLayers
+    if _timesheetLayers.Length = 0
+        _timesheetLayers := BuildDefaultTimesheetLayers()
+    return _timesheetLayers
+}
+
+BuildDefaultTimesheetLayers() {
+    layers := []
+    for base in ["A", "B", "C", "D", "E", "F", "G", "H"] {
+        layers.Push(base "_shita")
+        layers.Push(base)
+        layers.Push(base "_ue")
+    }
+    return layers
+}
+
+SerializeTimesheetLayers() {
+    return JoinText(GetTimesheetLayerOptions(), "|")
+}
+
+LoadTimesheetLayersFromString(raw) {
+    global _timesheetLayers
+    layers := []
+    for part in StrSplit(raw, "|") {
+        name := Trim(part)
+        if name != ""
+            layers.Push(name)
+    }
+    if layers.Length = 0
+        layers := BuildDefaultTimesheetLayers()
+    _timesheetLayers := layers
+}
+
+EnsureTimesheetLayerExists(layer) {
+    global _timesheetLayers
+    if Trim(layer) = ""
+        return
+    for existing in GetTimesheetLayerOptions() {
+        if existing = layer
+            return
+    }
+    _timesheetLayers.Push(layer)
+}
+
+IsDefaultVisibleTimesheetLayer(layer) {
+    return RegExMatch(layer, "^[A-H]$") > 0
+}
+
+ApplyTimesheetModeUI(g) {
+    tsMode := IsTimesheetMode(g)
+    g.expEdit.Enabled := !tsMode
+    g.btnExp1.Enabled := !tsMode
+    g.btnExp2.Enabled := !tsMode
+    g.btnExp3.Enabled := !tsMode
+    g.btnExp4.Enabled := !tsMode
+    g.btnExp5.Enabled := !tsMode
+    g.btnExp6.Enabled := !tsMode
+    g.btnApplyExp.Enabled := !tsMode
+    g.btnApplyAll.Enabled := !tsMode
+
+    g.btnUp.Enabled := !tsMode
+    g.btnDown.Enabled := !tsMode
+    g.btnSort.Enabled := !tsMode
+    g.btnRev.Enabled := !tsMode
+
+    g.lblExposure.Value := tsMode ? "Timesheet" : "Frames"
+}
+
+EnsureTimesheetFields(item) {
+    if !item.HasProp("tsEnabled")
+        item.tsEnabled := false
+    if !item.HasProp("tsLayer")
+        item.tsLayer := "A"
+    if !item.HasProp("tsKind")
+        item.tsKind := "Key"
+    if !item.HasProp("tsCell")
+        item.tsCell := ""
+    if !item.HasProp("tsStartFrame")
+        item.tsStartFrame := 1
+    if !item.HasProp("tsEndFrame")
+        item.tsEndFrame := Max(1, item.HasProp("exposure") ? item.exposure : 1)
+    if !item.HasProp("linkGroup")
+        item.linkGroup := ""
+    EnsureTimesheetLayerExists(item.tsLayer)
+}
+
+BuildLinkedDuplicateItem(src) {
+    copy := DeepCloneValue(src)
+    EnsureTimesheetFields(copy)
+    copy.tsEnabled := false
+    copy.tsCell := ""
+    copy.tsStartFrame := 1
+    copy.tsEndFrame := Max(1, copy.HasProp("exposure") ? copy.exposure : 1)
+    return copy
+}
+
+GenerateLinkGroupId() {
+    return "LG_" A_NowUTC "_" A_TickCount "_" Random(1000, 9999)
+}
+
+EnsureLinkedGroup(item) {
+    EnsureTimesheetFields(item)
+    if Trim(String(item.linkGroup)) = ""
+        item.linkGroup := GenerateLinkGroupId()
+    return item.linkGroup
+}
+
+WriteQueueItemsToIni(path, section) {
+    IniWrite(_imageList.Length, path, section, "Count")
+    for i, item in _imageList {
+        EnsureTimesheetFields(item)
+        prefix := "Item" i
+        IniWrite(item.path, path, section, prefix "_Path")
+        IniWrite(item.exposure, path, section, prefix "_Exposure")
+        IniWrite(item.type, path, section, prefix "_Type")
+        IniWrite(item.HasProp("frameCount") ? item.frameCount : 0, path, section, prefix "_FrameCount")
+        IniWrite(item.HasProp("durationSec") ? item.durationSec : 0, path, section, prefix "_DurationSec")
+        IniWrite(item.HasProp("previewFrame") ? item.previewFrame : 1, path, section, prefix "_PreviewFrame")
+        IniWrite(item.HasProp("note") ? item.note : "", path, section, prefix "_Note")
+        IniWrite(item.tsEnabled ? 1 : 0, path, section, prefix "_TsEnabled")
+        IniWrite(item.tsLayer, path, section, prefix "_TsLayer")
+        IniWrite(item.tsKind, path, section, prefix "_TsKind")
+        IniWrite(item.tsCell, path, section, prefix "_TsCell")
+        IniWrite(item.tsStartFrame, path, section, prefix "_TsStartFrame")
+        IniWrite(item.tsEndFrame, path, section, prefix "_TsEndFrame")
+        IniWrite(item.linkGroup, path, section, prefix "_LinkGroup")
+    }
+}
+
+ReadQueueItemsFromIni(path, section) {
+    items := []
+    count := Integer(IniRead(path, section, "Count", "0"))
+    Loop count {
+        prefix := "Item" A_Index
+        itemPath := IniRead(path, section, prefix "_Path", "")
+        if itemPath = ""
+            continue
+        SplitPath(itemPath, &name)
+        itemType := IniRead(path, section, prefix "_Type", "image")
+        item := {
+            path: itemPath,
+            name: name,
+            exposure: Integer(IniRead(path, section, prefix "_Exposure", "2")),
+            type: itemType,
+            note: IniRead(path, section, prefix "_Note", "")
+        }
+        EnsureTimesheetFields(item)
+        if itemType = "video" {
+            item.frameCount := Integer(IniRead(path, section, prefix "_FrameCount", "0"))
+            item.durationSec := Float(IniRead(path, section, prefix "_DurationSec", "0"))
+            item.previewFrame := Integer(IniRead(path, section, prefix "_PreviewFrame", "1"))
+        }
+        item.tsEnabled := Integer(IniRead(path, section, prefix "_TsEnabled", "0")) = 1
+        item.tsLayer := IniRead(path, section, prefix "_TsLayer", item.tsLayer)
+        item.tsKind := IniRead(path, section, prefix "_TsKind", item.tsKind)
+        item.tsCell := IniRead(path, section, prefix "_TsCell", item.tsCell)
+        item.tsStartFrame := Integer(IniRead(path, section, prefix "_TsStartFrame", item.tsStartFrame))
+        item.tsEndFrame := Integer(IniRead(path, section, prefix "_TsEndFrame", item.tsEndFrame))
+        item.linkGroup := IniRead(path, section, prefix "_LinkGroup", "")
+        EnsureTimesheetLayerExists(item.tsLayer)
+        items.Push(item)
+    }
+    return items
+}
+
+GetTimesheetKindOptions() {
+    return ["Key", "Inbetween"]
+}
+
+AutoDetectTimesheetFromName(name, &layer := "", &cell := "") {
+    layer := ""
+    cell := ""
+    if RegExMatch(name, "i)(?:^|[_\-\s])(A|B|C|D|E|F|G|H)\s*([0-9]+)_(shita|ue)(?:$|[_\-\s\.])", &m) {
+        layer := StrUpper(m[1]) "_" StrLower(m[3])
+        cell := m[2]
+        return true
+    }
+    if RegExMatch(name, "i)(?:^|[_\-\s])(A|B|C|D|E|F|G|H)_(shita|ue)\s*([0-9]+)", &m) {
+        layer := StrUpper(m[1]) "_" StrLower(m[2])
+        cell := m[3]
+        return true
+    }
+    if RegExMatch(name, "i)(?:^|[_\-\s])(A|B|C|D|E|F|G|H)\s*([0-9]+)", &m) {
+        layer := StrUpper(m[1])
+        cell := m[2]
+        return true
+    }
+    return false
+}
+
 AddSingleMedia(g, path) {
     global _selectedRow
     if !IsValidFile(path)
@@ -663,6 +885,12 @@ AddSingleMedia(g, path) {
             }
         }
     }
+    EnsureTimesheetFields(item)
+    AutoDetectTimesheetFromName(item.name, &tsLayer, &tsCell)
+    if tsLayer != ""
+        item.tsLayer := tsLayer
+    if tsCell != ""
+        item.tsCell := tsCell
     idx := _imageList.Length
     g.lv.Add(, idx, name, lbl, item.note)
     _selectedRow := idx
@@ -749,6 +977,7 @@ RemoveSelected(g) {
     rows := GetSelectedRows(g)
     if rows.Length = 0
         return
+    PushUndoState(g)
     g.Progress.Value := 0
     nextRow := rows[1]
     rows := SortRowsDescending(rows)
@@ -766,6 +995,7 @@ DuplicateSelected(g) {
     rows := GetSelectedRows(g)
     if rows.Length = 0
         return
+    PushUndoState(g)
     g.Progress.Value := 0
     rowsCopy := []
     newRows := []
@@ -777,6 +1007,7 @@ DuplicateSelected(g) {
         copy := src.Clone()
         SplitPath(copy.path, &nm)
         copy.name := nm
+        copy.linkGroup := ""
         _imageList.InsertAt(r + 1, copy)
         newRows.InsertAt(1, r + 1)
     }
@@ -788,8 +1019,11 @@ DuplicateSelected(g) {
 }
 
 SortByName(g) {
+    if IsTimesheetMode(g)
+        return
     global _imageList
     global _selectedRow
+    PushUndoState(g)
     g.Progress.Value := 0
     sorted := _imageList.Clone()
     Loop sorted.Length {
@@ -808,13 +1042,18 @@ SortByName(g) {
     _imageList := sorted
     _selectedRow := 0
     SyncListViewToModel(g)
+    ClearListViewSelection(g.lv)
     RefreshTimeline(g)
+    UpdatePreview(g)
     g.statText.Value := "Sorted by name"
 }
 
 ReverseOrder(g) {
+    if IsTimesheetMode(g)
+        return
     global _imageList
     global _selectedRow
+    PushUndoState(g)
     g.Progress.Value := 0
     reversed := []
     for i in _imageList
@@ -822,15 +1061,20 @@ ReverseOrder(g) {
     _imageList := reversed
     _selectedRow := 0
     SyncListViewToModel(g)
+    ClearListViewSelection(g.lv)
     RefreshTimeline(g)
+    UpdatePreview(g)
     g.statText.Value := "Reversed order"
 }
 
 SetExposurePreset(g, val) {
+    if IsTimesheetMode(g)
+        return
     g.expEdit.Value := val
     g.Progress.Value := 0
     rows := GetSelectedRows(g)
     if rows.Length > 0 {
+        PushUndoState(g)
         for r in rows
             _imageList[r].exposure := val
         UpdateListViewRows(g, rows)
@@ -843,6 +1087,9 @@ SetExposurePreset(g, val) {
 
 ClearAll(g) {
     global _imageList, _selectedRow
+    if _imageList.Length = 0
+        return
+    PushUndoState(g)
     g.Progress.Value := 0
     _imageList := []
     _selectedRow := 0
@@ -853,6 +1100,8 @@ ClearAll(g) {
 }
 
 MoveItem(g, dir) {
+    if IsTimesheetMode(g)
+        return
     global _selectedRow
     if _selectedRow = 0
         return
@@ -860,6 +1109,7 @@ MoveItem(g, dir) {
     target := row + dir
     if target < 1 || target > _imageList.Length
         return
+    PushUndoState(g)
     g.Progress.Value := 0
     tmp := _imageList[row]
     _imageList[row] := _imageList[target]
@@ -898,8 +1148,29 @@ UpdateListViewRow(g, row) {
     if row < 1 || row > _imageList.Length
         return
     item := _imageList[row]
-    lbl := item.type = "video" ? (item.frameCount > 0 ? item.frameCount " frames" : "video") : item.exposure
-    g.lv.Modify(row, "", row, item.name, lbl, item.HasProp("note") ? item.note : "")
+    EnsureTimesheetFields(item)
+    lbl := IsTimesheetMode(g)
+        ? ""
+        : (item.type = "video" ? (item.frameCount > 0 ? item.frameCount " frames" : "video") : item.exposure)
+    tsTotal := GetTimesheetTotalFrames()
+    tsLayer := item.tsEnabled ? item.tsLayer : ""
+    tsCell := item.tsEnabled ? item.tsCell : ""
+    tsStart := item.tsEnabled ? FormatTsFrameDisplay(item.tsStartFrame) : ""
+    tsEnd := item.tsEnabled ? FormatTsFrameDisplay(item.tsEndFrame) : ""
+    tsDur := item.tsEnabled ? tsTotal : ""
+    g.lv.Modify(
+        row,
+        "",
+        row,
+        item.name,
+        lbl,
+        item.HasProp("note") ? item.note : "",
+        tsLayer,
+        tsCell,
+        tsStart,
+        tsEnd,
+        tsDur
+    )
 }
 
 UpdateListViewRows(g, rows) {
@@ -966,6 +1237,7 @@ ApplyNote(g) {
     rows := GetSelectedRows(g)
     if rows.Length = 0
         return
+    PushUndoState(g)
     g.Progress.Value := 0
     for r in rows
         _imageList[r].note := g.noteEdit.Value
@@ -1126,8 +1398,11 @@ GetAspectWarning(g, srcW, srcH) {
 }
 
 ApplyExposure(g, all) {
+    if IsTimesheetMode(g)
+        return
     if _imageList.Length = 0
         return
+    PushUndoState(g)
     g.Progress.Value := 0
     raw := g.expEdit.Value
     val := raw ~= "^\d+$" ? Integer(raw) : 2
@@ -1157,6 +1432,13 @@ ApplyExposure(g, all) {
 }
 
 RefreshTimeline(g) {
+    if IsTimesheetMode(g) {
+        total := GetTimesheetTotalFrames()
+        fps := RefreshTimelineRaw(g)
+        dur := total / fps
+        g.timeText.Value := "Items: " _imageList.Length "  -  TS frames: " total "  -  Duration: " Format("{:.1f}", dur) "s (" FormatDuration(dur) ")"
+        return
+    }
     total := 0
     vidCount := 0
     for item in _imageList {
@@ -1189,6 +1471,154 @@ FormatDuration(sec) {
     m := Floor(sec / 60)
     s := Round(Mod(sec, 60))
     return m "m " s "s"
+}
+
+PushUndoState(g) {
+    global _undoStack, _redoStack, _MAX_UNDO, _isHistoryReplay
+    if _isHistoryReplay
+        return
+    _undoStack.Push(CaptureAppState(g))
+    while _undoStack.Length > _MAX_UNDO
+        _undoStack.RemoveAt(1)
+    _redoStack := []
+}
+
+CommitActiveTimesheetPending(force := false) {
+    global _activeTimesheetGui
+    if !IsObject(_activeTimesheetGui)
+        return
+    try {
+        if !_activeTimesheetGui.HasProp("Hwnd") || !WinExist("ahk_id " _activeTimesheetGui.Hwnd)
+            return
+    }
+    CommitPendingTimesheetFields(_activeTimesheetGui, force)
+}
+
+CommitTimesheetEditorEnter() {
+    global _activeTimesheetGui
+    if !IsObject(_activeTimesheetGui)
+        return
+    try {
+        if !_activeTimesheetGui.HasProp("Hwnd") || !WinExist("ahk_id " _activeTimesheetGui.Hwnd)
+            return
+    }
+    if !WinActive("ahk_id " _activeTimesheetGui.Hwnd)
+        return
+    CommitPendingTimesheetFields(_activeTimesheetGui, true)
+}
+
+CaptureAppState(g) {
+    global _imageList, _selectedRow, _timesheetLayers
+    state := {
+        selectedRow: _selectedRow,
+        imageList: DeepCloneValue(_imageList),
+        timesheetLayers: DeepCloneValue(_timesheetLayers),
+        fps: g.fpsEdit.Value,
+        width: g.widthEdit.Value,
+        height: g.heightEdit.Value,
+        outName: g.outEdit.Value,
+        fmtGIF: g.chkGIF.Value,
+        fmtMP4: g.chkMP4.Value,
+        fmtAVI: g.chkAVI.Value,
+        fmtWebM: g.chkWebM.Value,
+        fmtPNG: g.chkPNG.Value,
+        fmtSheet: g.chkSheet.Value,
+        sheetCount: g.sheetCountEdit.Value,
+        timestamp: g.chkTimestamp.Value,
+        loop: g.loopEdit.Value,
+        crf: g.crfEdit.Value,
+        fit: g.fitDDL.Text,
+        bg: g.bgEdit.Value,
+        bgAlpha: g.bgAlphaEdit.Value,
+        outputDir: g.dirEdit.Value,
+        audio: g.audioEdit.Value,
+        timesheetMode: g.chkTimesheet.Value,
+        expEdit: g.expEdit.Value,
+        noteEdit: g.noteEdit.Value
+    }
+    return state
+}
+
+DeepCloneValue(value) {
+    if !IsObject(value)
+        return value
+    if value is Array {
+        out := []
+        for item in value
+            out.Push(DeepCloneValue(item))
+        return out
+    }
+    if value is Map {
+        out := Map()
+        for key, item in value
+            out[key] := DeepCloneValue(item)
+        return out
+    }
+    out := {}
+    for key, item in value.OwnProps()
+        out.%key% := DeepCloneValue(item)
+    return out
+}
+
+RestoreAppState(g, state) {
+    global _imageList, _selectedRow, _isHistoryReplay, _timesheetLayers
+    _isHistoryReplay := true
+    try {
+        _imageList := DeepCloneValue(state.imageList)
+        _timesheetLayers := state.HasProp("timesheetLayers") ? DeepCloneValue(state.timesheetLayers) : BuildDefaultTimesheetLayers()
+        _selectedRow := state.selectedRow
+        g.fpsEdit.Value := state.fps
+        g.widthEdit.Value := state.width
+        g.heightEdit.Value := state.height
+        g.outEdit.Value := state.outName
+        g.chkGIF.Value := state.fmtGIF
+        g.chkMP4.Value := state.fmtMP4
+        g.chkAVI.Value := state.fmtAVI
+        g.chkWebM.Value := state.fmtWebM
+        g.chkPNG.Value := state.fmtPNG
+        g.chkSheet.Value := state.fmtSheet
+        g.sheetCountEdit.Value := state.sheetCount
+        g.chkTimestamp.Value := state.timestamp
+        g.loopEdit.Value := state.loop
+        g.crfEdit.Value := state.crf
+        TrySelectDropDownText(g.fitDDL, state.fit)
+        g.bgEdit.Value := state.bg
+        g.bgAlphaEdit.Value := state.bgAlpha
+        g.dirEdit.Value := state.outputDir
+        g.audioEdit.Value := state.audio
+        g.chkTimesheet.Value := state.timesheetMode
+        g.expEdit.Value := state.expEdit
+        g.noteEdit.Value := state.noteEdit
+        g.btnTimesheet.Enabled := g.chkTimesheet.Value = 1
+        ApplyTimesheetModeUI(g)
+        if _selectedRow > _imageList.Length
+            _selectedRow := _imageList.Length
+        selectedRows := _selectedRow > 0 ? [_selectedRow] : []
+        SyncListViewToModel(g, selectedRows, _selectedRow)
+        RefreshActiveTimesheetGui()
+        RefreshTimeline(g)
+        UpdatePreview(g)
+    } finally _isHistoryReplay := false
+}
+
+UndoAction(g) {
+    global _undoStack, _redoStack
+    if _undoStack.Length = 0
+        return
+    _redoStack.Push(CaptureAppState(g))
+    state := _undoStack.Pop()
+    RestoreAppState(g, state)
+    g.statText.Value := "Undo"
+}
+
+RedoAction(g) {
+    global _undoStack, _redoStack
+    if _redoStack.Length = 0
+        return
+    _undoStack.Push(CaptureAppState(g))
+    state := _redoStack.Pop()
+    RestoreAppState(g, state)
+    g.statText.Value := "Redo"
 }
 
 GetPrimaryOutputPath(outDir, outName, fmt) {
@@ -1255,10 +1685,15 @@ SavePreset(g) {
     IniWrite(g.bgEdit.Value, _PRESET_FILE, name, "BG")
     IniWrite(g.bgAlphaEdit.Value, _PRESET_FILE, name, "BGAlpha")
     IniWrite(g.audioEdit.Value, _PRESET_FILE, name, "Audio")
+    IniWrite(g.chkTimesheet.Value, _PRESET_FILE, name, "TimesheetMode")
+    IniWrite(SerializeTimesheetLayers(), _PRESET_FILE, name, "TsLayers")
+    WriteQueueItemsToIni(_PRESET_FILE, name)
     g.statText.Value := "Preset saved: " name
 }
 
 LoadPreset(g) {
+    global _imageList
+    global _selectedRow
     if !FileExist(_PRESET_FILE)
         return
     raw := IniRead(_PRESET_FILE)
@@ -1276,6 +1711,7 @@ LoadPreset(g) {
     sel := ib.Value
     if Trim(sel) = ""
         return
+    PushUndoState(g)
     g.fpsEdit.Value := IniRead(_PRESET_FILE, sel, "FPS", "24")
     g.widthEdit.Value := IniRead(_PRESET_FILE, sel, "Width", "1920")
     g.heightEdit.Value := IniRead(_PRESET_FILE, sel, "Height", "1080")
@@ -1292,7 +1728,21 @@ LoadPreset(g) {
     g.bgEdit.Value := NormalizeHexColor(IniRead(_PRESET_FILE, sel, "BG", "#FFFFFF"))
     g.bgAlphaEdit.Value := IniRead(_PRESET_FILE, sel, "BGAlpha", "FF")
     g.audioEdit.Value := IniRead(_PRESET_FILE, sel, "Audio", "")
-    RefreshTimeline(g)
+    g.chkTimesheet.Value := Integer(IniRead(_PRESET_FILE, sel, "TimesheetMode", "0"))
+    LoadTimesheetLayersFromString(IniRead(_PRESET_FILE, sel, "TsLayers", SerializeTimesheetLayers()))
+    presetItems := ReadQueueItemsFromIni(_PRESET_FILE, sel)
+    if presetItems.Length > 0 {
+        _imageList := presetItems
+        SyncLinkedDuplicateCells()
+        NormalizeTimesheetLayerTimings()
+        _selectedRow := 0
+        SyncListViewToModel(g)
+        RefreshTimeline(g)
+    }
+    g.btnTimesheet.Enabled := g.chkTimesheet.Value = 1
+    ApplyTimesheetModeUI(g)
+    OnFpsChanged(g)
+    UpdatePreview(g)
     g.statText.Value := "Preset loaded: " sel
 }
 
@@ -1307,16 +1757,49 @@ JoinText(arr, sep := ", ") {
 }
 
 TrySelectDropDownText(ctrl, text) {
-    Loop ctrl.GetCount() {
-        if ctrl.Text = text {
+    static CB_GETCOUNT := 0x146
+    static CB_GETLBTEXTLEN := 0x149
+    static CB_GETLBTEXT := 0x148
+
+    count := SendMessage(CB_GETCOUNT, 0, 0, ctrl.Hwnd)
+    if count = "" || count < 1 {
+        ctrl.Choose(1)
+        return
+    }
+
+    Loop count {
+        idx := A_Index - 1
+        len := SendMessage(CB_GETLBTEXTLEN, idx, 0, ctrl.Hwnd)
+        if len < 0
+            continue
+        buf := Buffer((len + 1) * 2, 0)
+        SendMessage(CB_GETLBTEXT, idx, buf.Ptr, ctrl.Hwnd)
+        itemText := StrGet(buf, "UTF-16")
+        if itemText = text {
             ctrl.Choose(A_Index)
             return
         }
-        ctrl.Choose(A_Index)
-        if ctrl.Text = text
-            return
     }
     ctrl.Choose(1)
+}
+
+FormatTsFrameDisplay(val) {
+    if val = ""
+        return ""
+    n := Integer(val)
+    return Format("{:02d}", n)
+}
+
+RefreshActiveTimesheetGui() {
+    global _activeTimesheetGui
+    if !IsObject(_activeTimesheetGui)
+        return
+    try {
+        if !_activeTimesheetGui.HasProp("Hwnd") || !WinExist("ahk_id " _activeTimesheetGui.Hwnd)
+            return
+    }
+    ReloadTimesheetList(_activeTimesheetGui)
+    LoadTimesheetEditorFromRows(_activeTimesheetGui)
 }
 
 LoadLastProject(g) {
@@ -1369,6 +1852,147 @@ GetCheckedFormats(g) {
     return fmts
 }
 
+IsTimesheetMode(g) {
+    return g.HasProp("chkTimesheet") && g.chkTimesheet.Value = 1
+}
+
+ToggleTimesheetMode(g) {
+    PushUndoState(g)
+    g.Progress.Value := 0
+    g.btnTimesheet.Enabled := g.chkTimesheet.Value = 1
+    ApplyTimesheetModeUI(g)
+    SyncListViewToModel(g)
+    RefreshTimeline(g)
+}
+
+GetTimesheetTotalFrames() {
+    total := 0
+    for item in _imageList {
+        EnsureTimesheetFields(item)
+        if item.tsEnabled && item.type = "image" && item.tsEndFrame > total
+            total := item.tsEndFrame
+    }
+    return total
+}
+
+GetTimesheetLayerRank(layer) {
+    for idx, name in GetTimesheetLayerOptions() {
+        if name = layer
+            return idx
+    }
+    return 999
+}
+
+GetTimesheetItemsForFrame(frameNo) {
+    active := []
+    for item in _imageList {
+        EnsureTimesheetFields(item)
+        if item.type != "image" || !item.tsEnabled
+            continue
+        if frameNo >= item.tsStartFrame && frameNo <= item.tsEndFrame
+            active.Push(item)
+    }
+    Loop active.Length {
+        swapped := false
+        Loop active.Length - 1 {
+            left := GetTimesheetLayerRank(active[A_Index].tsLayer)
+            right := GetTimesheetLayerRank(active[A_Index + 1].tsLayer)
+            if left > right {
+                tmp := active[A_Index]
+                active[A_Index] := active[A_Index + 1]
+                active[A_Index + 1] := tmp
+                swapped := true
+            }
+        }
+        if !swapped
+            break
+    }
+    return active
+}
+
+GetFFmpegColorValue(bgColor) {
+    hex := SubStr(NormalizeHexColor(bgColor), 2)
+    if StrLen(bgColor) = 9 {
+        alphaHex := SubStr(bgColor, 8, 2)
+        alphaVal := Integer("0x" alphaHex) / 255
+        return "0x" SubStr(hex, 1, 6) "@" Format("{:.3f}", alphaVal)
+    }
+    return "0x" SubStr(hex, 1, 6)
+}
+
+BuildTimesheetCompositeCmd(activeItems, w, h, fitMode, bgColor, outPath) {
+    q := Chr(34)
+    args := "-y -f lavfi -i color=c=" GetFFmpegColorValue(bgColor) ":s=" w "x" h ":d=1"
+    for item in activeItems
+        args .= " -i " q item.path q
+
+    filter := "[0:v]format=rgba[b0];"
+    scaleFilter := BuildTimesheetScaleFilter(w, h, fitMode)
+    overlayBase := "b0"
+    for idx, item in activeItems {
+        inIdx := idx
+        layerLabel := "l" idx
+        outLabel := "b" idx
+        if scaleFilter != ""
+            filter .= "[" inIdx ":v]" scaleFilter ",format=rgba[" layerLabel "];"
+        else
+            filter .= "[" inIdx ":v]format=rgba[" layerLabel "];"
+        filter .= "[" overlayBase "][" layerLabel "]overlay=0:0:format=auto[" outLabel "];"
+        overlayBase := outLabel
+    }
+
+    return args " -filter_complex " q filter q " -map " q "[" overlayBase "]" q " -frames:v 1 " q outPath q
+}
+
+CreateBlankFrame(destPath, w, h, bgColor) {
+    if w <= 0 || h <= 0
+        return false
+    colorVal := GetFFmpegColorValue(bgColor)
+    args := "-y -f lavfi -i color=c=" colorVal ":s=" w "x" h ":d=1 -frames:v 1 " Chr(34) destPath Chr(34)
+    return RunFFmpegLogged(args, A_Temp "\NastarxaIC_blank_" A_TickCount ".log") = 0 && FileExist(destPath)
+}
+
+BuildTimesheetScaleFilter(w, h, fitMode) {
+    if w <= 0 || h <= 0
+        return ""
+    transparent := "0x00000000"
+    switch fitMode {
+        case "contain", "pad":
+            return "scale=" w ":" h ":force_original_aspect_ratio=decrease,pad=" w ":" h ":(ow-iw)/2:(oh-ih)/2:" transparent
+        case "cover":
+            return "scale=" w ":" h ":force_original_aspect_ratio=increase,crop=" w ":" h
+        default:
+            return "scale=" w ":" h
+    }
+}
+
+PrepareTimesheetFrames(g, tempDir, w, h, fitMode, bgColor) {
+    totalFrames := GetTimesheetTotalFrames()
+    if totalFrames < 1
+        return 0
+    if w <= 0 || h <= 0 {
+        MsgBox "Timesheet mode needs a valid canvas width and height.", "Invalid Canvas", "IconX"
+        return -1
+    }
+    frameNum := 0
+    Loop totalFrames {
+        sheetFrame := A_Index
+        if _cancelGenerate
+            break
+        outFrame := tempDir "\" Format("{:06d}.png", frameNum)
+        active := GetTimesheetItemsForFrame(sheetFrame)
+        ok := active.Length > 0
+            ? (RunFFmpegLogged(BuildTimesheetCompositeCmd(active, w, h, fitMode, bgColor, outFrame), tempDir "\timesheet_compose.log", tempDir) = 0 && FileExist(outFrame))
+            : CreateBlankFrame(outFrame, w, h, bgColor)
+        if !ok
+            return -1
+        frameNum += 1
+        g.Progress.Value := Round(100 * sheetFrame / totalFrames)
+        g.statText.Value := "Preparing timesheet frames... " sheetFrame "/" totalFrames
+    }
+    return frameNum
+}
+
 Generate(g) {
     global _tempDir, _cancelGenerate
     if _imageList.Length = 0 {
@@ -1386,6 +2010,21 @@ Generate(g) {
     if fmts.Length = 0 {
         MsgBox "Select at least one output format.", "No Format", "Icon!"
         return
+    }
+    if IsTimesheetMode(g) {
+        tsTotal := GetTimesheetTotalFrames()
+        if tsTotal < 1 {
+            g.statText.Value := "Timesheet has no enabled frames"
+            MsgBox "Timesheet mode needs at least one enabled image with a valid Start/End frame.", "Timesheet Empty", "Icon!"
+            return
+        }
+        for item in _imageList {
+            EnsureTimesheetFields(item)
+            if item.type = "video" && item.tsEnabled {
+                MsgBox "Timesheet mode currently supports still-image layers only. Disable TS for video rows or remove them from the setup.", "Timesheet Mode", "Icon!"
+                return
+            }
+        }
     }
 
     outDir := g.dirEdit.Value
@@ -1444,36 +2083,52 @@ RunGenerate(g, outDir, outName, fmts, fps, w, h, fitMode, bgColor, audioPath, te
     stillDir := tempDir "\still"
     DirCreate(stillDir)
 
-    for item in _imageList {
-        if _cancelGenerate
-            break
-        if item.type = "video" {
-            vidDir := tempDir "\v" A_Index
-            DirCreate(vidDir)
-            vidPattern := Chr(34) vidDir "\%06d.png" Chr(34)
-            RunFFmpegLogged("-i " Chr(34) item.path Chr(34) " -vf " Chr(34) "fps=" fps Chr(34) " " vidPattern, tempDir "\video_extract.log", tempDir)
-            Loop Files, vidDir "\*.png", "F" {
-                dest := tempDir "\" Format("{:06d}.png", frameNum)
-                try FileMove(A_LoopFileFullPath, dest, 1)
-                frameNum++
-            }
-        } else {
-            srcFrame := stillDir "\" Format("{:06d}.png", processed)
-            if !PrepareStillFrame(item.path, srcFrame) {
-                g.statText.Value := "Failed to read image: " item.name
-                MsgBox "Failed to prepare image:`n" item.path "`n`n" (_lastPrepareError != "" ? _lastPrepareError : "Unknown ffmpeg/image conversion error."), "Image Read Error", "IconX"
-                continue
-            }
-            Loop item.exposure {
-                dest := tempDir "\" Format("{:06d}.png", frameNum)
-                try FileCopy(srcFrame, dest, 1)
-                frameNum++
-            }
+    if IsTimesheetMode(g) {
+        frameNum := PrepareTimesheetFrames(g, tempDir, w, h, fitMode, bgColor)
+        if frameNum < 0 {
+            try DirDelete(tempDir, true)
+            if _tempDir = tempDir
+                _tempDir := ""
+            g.statText.Value := "Failed to build timesheet frames"
+            g.Progress.Visible := false
+            g.btnGen.Enabled := true
+            g.btnCancel.Enabled := false
+            MsgBox "Failed to compose one or more timesheet frames. Check that assigned files still exist and can be read by ffmpeg.", "Timesheet Error", "IconX"
+            return
         }
-        processed++
-        pct := Round(100 * processed / _imageList.Length)
-        g.Progress.Value := pct
-        g.statText.Value := "Preparing frames... " processed "/" _imageList.Length
+    } else {
+
+        for item in _imageList {
+            if _cancelGenerate
+                break
+            if item.type = "video" {
+                vidDir := tempDir "\v" A_Index
+                DirCreate(vidDir)
+                vidPattern := Chr(34) vidDir "\%06d.png" Chr(34)
+                RunFFmpegLogged("-i " Chr(34) item.path Chr(34) " -vf " Chr(34) "fps=" fps Chr(34) " " vidPattern, tempDir "\video_extract.log", tempDir)
+                Loop Files, vidDir "\*.png", "F" {
+                    dest := tempDir "\" Format("{:06d}.png", frameNum)
+                    try FileMove(A_LoopFileFullPath, dest, 1)
+                    frameNum++
+                }
+            } else {
+                srcFrame := stillDir "\" Format("{:06d}.png", processed)
+                if !PrepareStillFrame(item.path, srcFrame) {
+                    g.statText.Value := "Failed to read image: " item.name
+                    MsgBox "Failed to prepare image:`n" item.path "`n`n" (_lastPrepareError != "" ? _lastPrepareError : "Unknown ffmpeg/image conversion error."), "Image Read Error", "IconX"
+                    continue
+                }
+                Loop item.exposure {
+                    dest := tempDir "\" Format("{:06d}.png", frameNum)
+                    try FileCopy(srcFrame, dest, 1)
+                    frameNum++
+                }
+            }
+            processed++
+            pct := Round(100 * processed / _imageList.Length)
+            g.Progress.Value := pct
+            g.statText.Value := "Preparing frames... " processed "/" _imageList.Length
+        }
     }
 
     if _cancelGenerate {
@@ -1662,11 +2317,19 @@ BuildScaleFilter(w, h, fitMode, bgColor) {
     }
 }
 
+BuildVideoEncodeFilter(scaleFilter := "") {
+    evenFilter := "pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0"
+    if scaleFilter = ""
+        return evenFilter
+    return scaleFilter "," evenFilter
+}
+
 BuildFFmpegCmd(fmt, fps, w, h, fitMode, bgColor, loopVal, crf, audioPath, inputDir, outputPath) {
     q := Chr(34)
     inPattern := q inputDir "\%06d.png" q
     out := q outputPath q
     scaleFilter := BuildScaleFilter(w, h, fitMode, bgColor)
+    videoFilter := BuildVideoEncodeFilter(scaleFilter)
     audioArgs := ""
     if (fmt = "MP4" || fmt = "WebM") && audioPath != "" && FileExist(audioPath)
         audioArgs := " -i " q audioPath q " -shortest"
@@ -1679,16 +2342,13 @@ BuildFFmpegCmd(fmt, fps, w, h, fitMode, bgColor, loopVal, crf, audioPath, inputD
             cmd1 := "-y -framerate " fps " -i " inPattern " -vf " filter " -loop " gifLoop " " out
         case "MP4":
             cmd1 := "-y -framerate " fps " -i " inPattern audioArgs " -c:v libx264 -pix_fmt yuv420p -crf " crf " -movflags +faststart " out
-            if scaleFilter != ""
-                cmd1 := "-y -framerate " fps " -i " inPattern audioArgs " -vf " q scaleFilter q " -c:v libx264 -pix_fmt yuv420p -crf " crf " -movflags +faststart " out
+            cmd1 := "-y -framerate " fps " -i " inPattern audioArgs " -vf " q videoFilter q " -c:v libx264 -pix_fmt yuv420p -crf " crf " -movflags +faststart " out
         case "AVI":
             cmd1 := "-y -framerate " fps " -i " inPattern " -c:v libx264 -pix_fmt yuv420p -crf " crf " " out
-            if scaleFilter != ""
-                cmd1 := "-y -framerate " fps " -i " inPattern " -vf " q scaleFilter q " -c:v libx264 -pix_fmt yuv420p -crf " crf " " out
+            cmd1 := "-y -framerate " fps " -i " inPattern " -vf " q videoFilter q " -c:v libx264 -pix_fmt yuv420p -crf " crf " " out
         case "WebM":
             cmd1 := "-y -framerate " fps " -i " inPattern audioArgs " -c:v libvpx -pix_fmt yuv420p -auto-alt-ref 0 -b:v 1M -crf " crf " " out
-            if scaleFilter != ""
-                cmd1 := "-y -framerate " fps " -i " inPattern audioArgs " -vf " q scaleFilter q " -c:v libvpx -pix_fmt yuv420p -auto-alt-ref 0 -b:v 1M -crf " crf " " out
+            cmd1 := "-y -framerate " fps " -i " inPattern audioArgs " -vf " q videoFilter q " -c:v libvpx -pix_fmt yuv420p -auto-alt-ref 0 -b:v 1M -crf " crf " " out
         default:
             cmd1 := "-y -framerate " fps " -i " inPattern " " out
             if scaleFilter != ""
@@ -1705,7 +2365,7 @@ BuildContactSheetCmd(fps, w, h, fitMode, bgColor, inputDir, outputPath, frameCou
     rows := Ceil(frameCount / cols)
     tileW := w > 0 ? Max(1, w // cols) : 320
     tileH := h > 0 ? Max(1, h // rows) : 180
-    scaleFilter := BuildScaleFilter(tileW, tileH, fitMode, bgColor)
+    scaleFilter := BuildScaleFilter(tileW, tileH, "contain", bgColor)
     vf := scaleFilter != "" ? scaleFilter ",tile=" cols "x" rows : "tile=" cols "x" rows
     return "-y -framerate " fps " -start_number " startNum " -i " inPattern " -vf " q vf q " -frames:v 1 " out
 }
@@ -1748,12 +2408,13 @@ ApplyLayout(g, aW, aH) {
     g.btnGuide.Move(leftX + 622, btnY, 56)
 
     g.lv.Move(leftX, lvY, leftW, lvH)
-    nameW := leftW - 280
-    if nameW < 220
-        nameW := 220
-    noteColW := leftW - nameW - 120
-    if noteColW < 120
-        noteColW := 120
+    fixedColsW := 35 + 50 + 72 + 48 + 52 + 52 + 58
+    nameW := leftW - fixedColsW - 100
+    if nameW < 210
+        nameW := 210
+    noteColW := leftW - fixedColsW - nameW
+    if noteColW < 100
+        noteColW := 100
     UpdateListViewColumns(g, nameW, noteColW)
 
     g.lblExposure.Move(leftX, bottomY + 4)
@@ -1808,18 +2469,20 @@ ApplyLayout(g, aW, aH) {
     g.chkPNG.Move(rightX + labelW, row2Y + 26, 54)
     g.chkSheet.Move(rightX + 108, row2Y + 26, 62)
     g.sheetCountEdit.Move(rightX + 176, row2Y + 26, 48)
-    g.lblSheetCount.Move(rightX + 230, row2Y + 30, 100)
+    g.lblSheetCount.Move(rightX + 232, row2Y + 30, 100)
 
     g.lblSize.Move(rightX, row3Y + 4)
     g.widthEdit.Move(rightX + labelW, row3Y, 74)
     g.lblSizeX.Move(rightX + 128, row3Y + 4)
     g.heightEdit.Move(rightX + 146, row3Y, 74)
-    g.lblFit.Move(rightX + 232, row3Y + 4)
-    g.fitDDL.Move(rightX + 264, row3Y, 96)
+    g.lblFit.Move(rightX + 234, row3Y + 4)
+    g.fitDDL.Move(rightX + 260, row3Y, 96)
 
     g.lblFilename.Move(rightX, row4Y + 4)
-    g.outEdit.Move(rightX + labelW, row4Y, 176)
-    g.chkTimestamp.Move(rightX + 236, row4Y + 2, 64)
+    g.outEdit.Move(rightX + labelW, row4Y, 136)
+    g.chkTimestamp.Move(rightX + 191, row4Y + 2, 64)
+    g.chkTimesheet.Move(rightX + 250, row4Y + 2, 38)
+    g.btnTimesheet.Move(rightX + 288, row4Y, 72, 24)
 
     g.lblBg.Move(rightX, row5Y + 4)
     g.bgEdit.Move(rightX + labelW, row5Y, 60)
@@ -1891,14 +2554,39 @@ UpdateListViewColumns(g, nameW, noteColW) {
         g._lvCol2 := nameW
         changed := true
     }
-    if !g.HasProp("_lvCol3") || g._lvCol3 != 65 {
-        g.lv.ModifyCol(3, 65)
-        g._lvCol3 := 65
+    if !g.HasProp("_lvCol3") || g._lvCol3 != 50 {
+        g.lv.ModifyCol(3, 50)
+        g._lvCol3 := 50
         changed := true
     }
     if !g.HasProp("_lvCol4") || g._lvCol4 != noteColW {
         g.lv.ModifyCol(4, noteColW)
         g._lvCol4 := noteColW
+        changed := true
+    }
+    if !g.HasProp("_lvCol5") || g._lvCol5 != 72 {
+        g.lv.ModifyCol(5, 72)
+        g._lvCol5 := 72
+        changed := true
+    }
+    if !g.HasProp("_lvCol6") || g._lvCol6 != 48 {
+        g.lv.ModifyCol(6, 48)
+        g._lvCol6 := 48
+        changed := true
+    }
+    if !g.HasProp("_lvCol7") || g._lvCol7 != 52 {
+        g.lv.ModifyCol(7, 52)
+        g._lvCol7 := 52
+        changed := true
+    }
+    if !g.HasProp("_lvCol8") || g._lvCol8 != 52 {
+        g.lv.ModifyCol(8, 52)
+        g._lvCol8 := 52
+        changed := true
+    }
+    if !g.HasProp("_lvCol9") || g._lvCol9 != 58 {
+        g.lv.ModifyCol(9, 58)
+        g._lvCol9 := 58
         changed := true
     }
     return changed
@@ -1909,22 +2597,6 @@ SetListViewRedraw(lv, enabled) {
     SendMessage(WM_SETREDRAW, enabled ? 1 : 0, 0, lv.Hwnd)
     if enabled
         DllCall("RedrawWindow", "ptr", lv.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x0101)
-}
-
-BeginListUpdate(g) {
-    if !g.HasProp("_lvUpdateDepth")
-        g._lvUpdateDepth := 0
-    g._lvUpdateDepth += 1
-    if g._lvUpdateDepth = 1
-        SetListViewRedraw(g.lv, false)
-}
-
-EndListUpdate(g) {
-    if !g.HasProp("_lvUpdateDepth") || g._lvUpdateDepth < 1
-        return
-    g._lvUpdateDepth -= 1
-    if g._lvUpdateDepth = 0
-        SetListViewRedraw(g.lv, true)
 }
 
 EnableListViewDoubleBuffer(lv) {
@@ -1974,6 +2646,854 @@ ShowGuide() {
     MsgBox(guide, "How to Use Nastarxa Image Combiner", "Iconi")
 }
 
+ShowTimesheetSetup(mainGui) {
+    global _activeTimesheetGui
+    for item in _imageList
+        EnsureTimesheetFields(item)
+
+    ts := Gui("+Owner" mainGui.Hwnd, "Timesheet Layer Setup")
+    ts.BackColor := "F2F2F2"
+    ts.SetFont("s9", "Segoe UI")
+    ts.MarginX := 12
+    ts.MarginY := 10
+    ts.mainGui := mainGui
+    _activeTimesheetGui := ts
+
+    ts.tabs := ts.AddTab3("x12 y10 w980 h472 c202020", ["Assignments", "Help"])
+    ts.tabs.SetFont("c202020", "Segoe UI")
+
+    ts.tabs.UseTab(1)
+    ts.lv := ts.AddListView(
+        "x24 y48 w956 h252 Multi BackgroundFFFFFF c000000 Grid",
+        ["#", "Active", "File", "Layer", "Type", "Cell", "Start", "End", "TS Dur"]
+    )
+    ts.lv.ModifyCol(1, 35)
+    ts.lv.ModifyCol(2, 46)
+    ts.lv.ModifyCol(3, 340)
+    ts.lv.ModifyCol(4, 108)
+    ts.lv.ModifyCol(5, 88)
+    ts.lv.ModifyCol(6, 64)
+    ts.lv.ModifyCol(7, 64)
+    ts.lv.ModifyCol(8, 64)
+    ts.lv.ModifyCol(9, 72)
+
+    ts.lblUse := ts.AddText("x24 y316 c202020", "Active")
+    ts.chkUse := ts.AddCheckbox("x60 y314 w22 h22 cFFFFFF")
+    ts.lblLayer := ts.AddText("x102 y316 c202020", "Layer")
+    ts.ddlLayer := ts.AddDropDownList("x144 y312 w138 Choose2", GetTimesheetLayerOptions())
+    ts.btnLayerUp := ts.AddButton("x286 y312 w56 h22", "Top+")
+    ts.btnLayerDown := ts.AddButton("x346 y312 w56 h22", "Bot+")
+    ts.btnLayerDel := ts.AddButton("x406 y312 w56 h22", "Del")
+    ts.lblKind := ts.AddText("x470 y316 c202020", "Type")
+    ts.ddlKind := ts.AddDropDownList("x508 y312 w96 Choose1", GetTimesheetKindOptions())
+    ts.lblCell := ts.AddText("x618 y316 c202020", "Cell")
+    ts.edCell := ts.AddEdit("x652 y312 w58 h22 BackgroundFFFFFF c000000")
+    ts.lblStart := ts.AddText("x724 y316 c202020", "Start")
+    ts.edStart := ts.AddEdit("x764 y312 w52 h22 Number BackgroundFFFFFF c000000", "1")
+    ts.lblEnd := ts.AddText("x826 y316 c202020", "End")
+    ts.edEnd := ts.AddEdit("x856 y312 w52 h22 Number BackgroundFFFFFF c000000", "1")
+
+    ts.btnAutoSel := ts.AddButton("x24 y352 w144 h26", "Auto Detect Selected")
+    ts.btnAutoAll := ts.AddButton("x176 y352 w144 h26", "Auto Detect All")
+    ts.btnFillAll := ts.AddButton("x328 y352 w170 h26", "Fill Missing End = Start")
+    ts.btnLinkDup := ts.AddButton("x506 y352 w112 h26", "Link Dup")
+    ts.btnPreview := ts.AddButton("x626 y352 w108 h26", "Preview...")
+    ts.lblTotal := ts.AddText("x742 y356 w238 h18 c202020", "")
+    ts.info := ts.AddText("x24 y392 w956 h38 c404040"
+        , "Assign a queue item to a layer column, cell number, and frame range. "
+        . "Frames are absolute output frames, so if an item starts at frame 74 it will appear from frame 74 onward. "
+        . "TS Duration is the maximum End frame from all enabled rows, used as the final video duration.")
+
+    ts.tabs.UseTab(2)
+    ts.help := ts.AddEdit("x24 y48 w956 h380 ReadOnly -Wrap BackgroundFFFFFF c000000"
+        , "Timesheet layering mode" "`r`n`r`n"
+        . "Layer order:" "`r`n"
+        . "Each base layer has three positions:" "`r`n"
+        . "A_shita -> A -> A_ue -> B_shita -> B -> B_ue -> ... -> H_shita -> H -> H_ue" "`r`n`r`n"
+        . "Use this when your cut is built from stacked cel layers instead of a simple frame queue." "`r`n`r`n"
+        . "Fields:" "`r`n"
+        . "- Layer: which timesheet column the image belongs to." "`r`n"
+        . "- Cell: the cel number shown in that column." "`r`n"
+        . "- Start / End: absolute output frames where this image is active." "`r`n`r`n"
+        . "Notes:" "`r`n"
+        . "- Link Dup makes another timesheet row that points to the same source file, so one image can have multiple TS setups." "`r`n"
+        . "- Every layer A-H can use _shita and _ue." "`r`n"
+        . "- Auto Detect tries to read names like A1, B12, A1_shita, B3_ue." "`r`n"
+        . "- When Timesheet mode is enabled, output is composited per frame by layer order.")
+
+    ts.tabs.UseTab()
+    ts.btnClose := ts.AddButton("x860 y490 w120 h28", "Close")
+
+    ts.lv.OnEvent("Click", (lv, row) => (CommitPendingTimesheetFields(ts), LoadTimesheetEditorFromRows(ts)))
+    ts.lv.OnEvent("ItemFocus", (lv, row) => row ? (CommitPendingTimesheetFields(ts), LoadTimesheetEditorFromRows(ts)) : 0)
+    ts.chkUse.OnEvent("Click", (*) => ApplyTimesheetUseState(ts))
+    ts.ddlLayer.OnEvent("Change", (*) => ScheduleTimesheetFieldApply(ts))
+    ts.ddlLayer.OnEvent("LoseFocus", (*) => CommitPendingTimesheetFields(ts))
+    ts.btnLayerUp.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), AddManualTimesheetLayer(ts, true)))
+    ts.btnLayerDown.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), AddManualTimesheetLayer(ts, false)))
+    ts.btnLayerDel.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), DeleteManualTimesheetLayer(ts)))
+    ts.ddlKind.OnEvent("Change", (*) => ScheduleTimesheetFieldApply(ts))
+    ts.ddlKind.OnEvent("LoseFocus", (*) => CommitPendingTimesheetFields(ts))
+    ts.edCell.OnEvent("Change", (*) => ScheduleTimesheetFieldApply(ts))
+    ts.edCell.OnEvent("LoseFocus", (*) => CommitPendingTimesheetFields(ts))
+    ts.edStart.OnEvent("Change", (*) => ScheduleTimesheetFieldApply(ts))
+    ts.edStart.OnEvent("LoseFocus", (*) => CommitPendingTimesheetFields(ts))
+    ts.edEnd.OnEvent("Change", (*) => ScheduleTimesheetFieldApply(ts))
+    ts.edEnd.OnEvent("LoseFocus", (*) => CommitPendingTimesheetFields(ts))
+    ts.btnAutoSel.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), AutoDetectTimesheetRows(ts, true)))
+    ts.btnAutoAll.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), AutoDetectTimesheetRows(ts, false)))
+    ts.btnFillAll.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), FillMissingTimesheetEnds(ts)))
+    ts.btnLinkDup.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), LinkedDuplicateTimesheetRows(ts)))
+    ts.btnPreview.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), ShowTimesheetPreview(ts)))
+    ts.OnEvent("Close", (*) => CloseTimesheetSetup(ts))
+    ts.btnClose.OnEvent("Click", (*) => CloseTimesheetSetup(ts))
+
+    ReloadTimesheetList(ts)
+    LoadTimesheetEditorFromRows(ts)
+    ts.Show("w1004 h536")
+}
+
+ReloadTimesheetList(ts) {
+    BeginListUpdate(ts)
+    try {
+        ts.lv.Delete()
+        tsTotal := GetTimesheetTotalFrames()
+        for idx, item in _imageList {
+            EnsureTimesheetFields(item)
+            ts.lv.Add(
+                ,
+                idx,
+                item.tsEnabled ? "Y" : "",
+                item.name,
+                item.tsLayer,
+                item.tsKind,
+                item.tsCell,
+                FormatTsFrameDisplay(item.tsStartFrame),
+                FormatTsFrameDisplay(item.tsEndFrame),
+                item.tsEnabled ? tsTotal : ""
+            )
+        }
+    } finally EndListUpdate(ts)
+    UpdateTimesheetSummary(ts)
+}
+
+UpdateTimesheetSummary(ts) {
+    total := GetTimesheetTotalFrames()
+    fps := RefreshTimelineRaw(ts.mainGui)
+    dur := fps > 0 ? total / fps : 0
+    ts.lblTotal.Value := "TS Duration / Video Max: " total " frame(s)  |  " Format("{:.2f}", dur) "s @ " fps " fps"
+}
+
+BeginListUpdate(guiOrTs) {
+    if !guiOrTs.HasProp("_lvUpdateDepth")
+        guiOrTs._lvUpdateDepth := 0
+    guiOrTs._lvUpdateDepth += 1
+    if guiOrTs._lvUpdateDepth = 1
+        SetListViewRedraw(guiOrTs.lv, false)
+}
+
+EndListUpdate(guiOrTs) {
+    if !guiOrTs.HasProp("_lvUpdateDepth") || guiOrTs._lvUpdateDepth < 1
+        return
+    guiOrTs._lvUpdateDepth -= 1
+    if guiOrTs._lvUpdateDepth = 0
+        SetListViewRedraw(guiOrTs.lv, true)
+}
+
+GetSelectedListRows(lv) {
+    rows := []
+    row := 0
+    Loop {
+        row := lv.GetNext(row)
+        if !row
+            break
+        rows.Push(row)
+    }
+    return rows
+}
+
+LoadTimesheetEditorFromRows(ts) {
+    rows := GetSelectedListRows(ts.lv)
+    if rows.Length = 0 && _imageList.Length > 0 {
+        ts.lv.Modify(1, "Select Focus Vis")
+        rows := [1]
+    }
+    if rows.Length = 0
+        return
+    ts._loadingEditor := true
+    item := _imageList[rows[1]]
+    EnsureTimesheetFields(item)
+    allUse := true
+    for row in rows {
+        rowItem := _imageList[row]
+        EnsureTimesheetFields(rowItem)
+        if !rowItem.tsEnabled {
+            allUse := false
+            break
+        }
+    }
+    ts.chkUse.Value := allUse ? 1 : 0
+    TrySelectDropDownText(ts.ddlLayer, item.tsLayer)
+    TrySelectDropDownText(ts.ddlKind, item.tsKind)
+    ts.edCell.Value := item.tsCell
+    ts.edStart.Value := item.tsStartFrame
+    ts.edEnd.Value := item.tsEndFrame
+    ts._loadingEditor := false
+}
+
+ApplyTimesheetUseState(ts) {
+    rows := GetSelectedListRows(ts.lv)
+    if rows.Length = 0
+        return
+    if ts.chkUse.Value = 1 {
+        appendStart := GetTimesheetTotalFrames() + 1
+        if appendStart < 1
+            appendStart := 1
+        ts.edStart.Value := appendStart
+        endVal := ts.edEnd.Value ~= "^\d+$" ? Integer(ts.edEnd.Value) : 0
+        if endVal < appendStart
+            ts.edEnd.Value := appendStart
+    }
+    ApplyTimesheetEditorToSelected(ts, true)
+}
+
+ScheduleTimesheetFieldApply(ts) {
+    if ts.HasProp("_loadingEditor") && ts._loadingEditor
+        return
+    ts._pendingFieldApply := true
+}
+
+CommitPendingTimesheetFields(ts, force := false) {
+    if !IsSet(ts) || !IsObject(ts)
+        return
+    try {
+        if !ts.HasProp("Hwnd") || !WinExist("ahk_id " ts.Hwnd)
+            return
+    }
+    if ts.HasProp("_loadingEditor") && ts._loadingEditor
+        return
+    if !force && (!ts.HasProp("_pendingFieldApply") || !ts._pendingFieldApply)
+        return
+    ts._pendingFieldApply := false
+    rows := GetSelectedListRows(ts.lv)
+    if rows.Length = 0
+        return
+    ApplyTimesheetEditorToSelected(ts, false)
+}
+
+CloseTimesheetSetup(ts) {
+    global _activeTimesheetGui
+    CommitPendingTimesheetFields(ts)
+    SyncListViewToModel(ts.mainGui)
+    RefreshTimeline(ts.mainGui)
+    UpdatePreview(ts.mainGui)
+    _activeTimesheetGui := ""
+    ts.Destroy()
+}
+
+AddManualTimesheetLayer(ts, insertBefore := true) {
+    anchor := ts.ddlLayer.Text
+    if Trim(anchor) = ""
+        anchor := GetTimesheetLayerOptions()[1]
+    ib := InputBox("New layer name:", insertBefore ? "Add Layer Above" : "Add Layer Below")
+    if ib.Result != "OK"
+        return
+    newLayer := Trim(ib.Value)
+    if newLayer = "" {
+        MsgBox "Layer name cannot be empty.", "Timesheet Layer", "Icon!"
+        return
+    }
+    for layer in GetTimesheetLayerOptions() {
+        if layer = newLayer {
+            MsgBox "That layer name already exists.", "Timesheet Layer", "Icon!"
+            return
+        }
+    }
+    layers := GetTimesheetLayerOptions()
+    anchorIdx := 0
+    Loop layers.Length {
+        if layers[A_Index] = anchor {
+            anchorIdx := A_Index
+            break
+        }
+    }
+    if anchorIdx = 0
+        anchorIdx := layers.Length
+    insertIdx := insertBefore ? anchorIdx : anchorIdx + 1
+    global _timesheetLayers
+    _timesheetLayers.InsertAt(insertIdx, newLayer)
+    ts.Destroy()
+    ShowTimesheetSetup(ts.mainGui)
+}
+
+LinkedDuplicateTimesheetRows(ts) {
+    rows := GetSelectedListRows(ts.lv)
+    if rows.Length = 0
+        return
+    PushUndoState(ts.mainGui)
+    insertedRows := []
+    rowsDesc := SortRowsDescending(rows.Clone())
+    for _, row in rowsDesc {
+        EnsureLinkedGroup(_imageList[row])
+        copy := BuildLinkedDuplicateItem(_imageList[row])
+        insertAt := row + 1
+        _imageList.InsertAt(insertAt, copy)
+        insertedRows.InsertAt(1, insertAt)
+    }
+    ReloadTimesheetList(ts)
+    ClearListViewSelection(ts.lv)
+    for row in insertedRows
+        ts.lv.Modify(row, "Select")
+    ts.lv.Modify(insertedRows[1], "Focus Vis")
+    LoadTimesheetEditorFromRows(ts)
+    SyncListViewToModel(ts.mainGui, insertedRows, insertedRows[1])
+    RefreshTimeline(ts.mainGui)
+    UpdatePreview(ts.mainGui)
+    ts.mainGui.statText.Value := "Linked duplicated " rows.Length " item(s)"
+}
+
+DeleteManualTimesheetLayer(ts) {
+    layer := Trim(ts.ddlLayer.Text)
+    if layer = ""
+        return
+    if RegExMatch(layer, "^[A-H]$") {
+        MsgBox "Base layers A to H cannot be deleted.", "Timesheet Layer", "Icon!"
+        return
+    }
+    rowsToMove := []
+    fallback := GetFallbackTimesheetLayer(layer)
+    for idx, item in _imageList {
+        EnsureTimesheetFields(item)
+        if item.tsLayer = layer
+            rowsToMove.Push(idx)
+    }
+    if rowsToMove.Length > 0 {
+        PushUndoState(ts.mainGui)
+        for row in rowsToMove
+            _imageList[row].tsLayer := fallback
+        SyncLinkedDuplicateCells(rowsToMove)
+    }
+    global _timesheetLayers
+    Loop _timesheetLayers.Length {
+        if _timesheetLayers[A_Index] = layer {
+            _timesheetLayers.RemoveAt(A_Index)
+            break
+        }
+    }
+    if rowsToMove.Length > 0
+        NormalizeTimesheetLayerTimings(CollectAffectedTimesheetLayers(rowsToMove))
+    ts.Destroy()
+    ShowTimesheetSetup(ts.mainGui)
+}
+
+GetFallbackTimesheetLayer(layer) {
+    layers := GetTimesheetLayerOptions()
+    foundIdx := 0
+    Loop layers.Length {
+        if layers[A_Index] = layer {
+            foundIdx := A_Index
+            break
+        }
+    }
+    if foundIdx > 1
+        return layers[foundIdx - 1]
+    return layers.Length > 1 ? layers[2] : "A"
+}
+
+SnapshotTimesheetRows(rows) {
+    snapshot := Map()
+    for row in rows {
+        item := _imageList[row]
+        EnsureTimesheetFields(item)
+        snapshot[row] := {
+            tsEnabled: item.tsEnabled,
+            tsLayer: item.tsLayer,
+            tsKind: item.tsKind,
+            tsCell: item.tsCell,
+            tsStartFrame: item.tsStartFrame,
+            tsEndFrame: item.tsEndFrame
+        }
+    }
+    return snapshot
+}
+
+RestoreTimesheetRows(snapshot) {
+    for row, saved in snapshot {
+        item := _imageList[row]
+        EnsureTimesheetFields(item)
+        item.tsEnabled := saved.tsEnabled
+        item.tsLayer := saved.tsLayer
+        item.tsKind := saved.tsKind
+        item.tsCell := saved.tsCell
+        item.tsStartFrame := saved.tsStartFrame
+        item.tsEndFrame := saved.tsEndFrame
+    }
+}
+
+TimesheetRowsNeedChange(rows, useState, useOnly, layer, kind, cell, startFrame, endFrame) {
+    for row in rows {
+        item := _imageList[row]
+        EnsureTimesheetFields(item)
+        if item.tsEnabled != useState
+            return true
+        if useOnly
+            continue
+        if item.tsLayer != layer
+            return true
+        if item.tsKind != kind
+            return true
+        if String(item.tsCell) != String(cell)
+            return true
+        if item.tsStartFrame != startFrame
+            return true
+        if item.tsEndFrame != endFrame
+            return true
+    }
+    return false
+}
+
+SyncLinkedDuplicateCells(rows := "") {
+    combos := Map()
+    if IsObject(rows) && rows.Length > 0 {
+        for row in rows {
+            item := _imageList[row]
+            EnsureTimesheetFields(item)
+            group := Trim(String(item.linkGroup))
+            if item.type != "image" || group = ""
+                continue
+            key := group "|" item.tsLayer
+            cell := Trim(String(item.tsCell))
+            if !combos.Has(key) || (combos[key].cell = "" && cell != "")
+                combos[key] := {group: group, layer: item.tsLayer, cell: cell}
+        }
+    } else {
+        for _, item in _imageList {
+            EnsureTimesheetFields(item)
+            group := Trim(String(item.linkGroup))
+            if item.type != "image" || group = ""
+                continue
+            key := group "|" item.tsLayer
+            cell := Trim(String(item.tsCell))
+            if !combos.Has(key) || (combos[key].cell = "" && cell != "")
+                combos[key] := {group: group, layer: item.tsLayer, cell: cell}
+        }
+    }
+    for _, combo in combos {
+        desiredCell := combo.cell
+        if desiredCell = "" {
+            for _, item in _imageList {
+                EnsureTimesheetFields(item)
+                if item.type = "image" && item.linkGroup = combo.group && item.tsLayer = combo.layer {
+                    cell := Trim(String(item.tsCell))
+                    if cell != "" {
+                        desiredCell := cell
+                        break
+                    }
+                }
+            }
+        }
+        if desiredCell = ""
+            continue
+        for _, item in _imageList {
+            EnsureTimesheetFields(item)
+            if item.type = "image" && item.linkGroup = combo.group && item.tsLayer = combo.layer
+                item.tsCell := desiredCell
+        }
+    }
+}
+
+CollectAffectedTimesheetLayers(rows) {
+    layers := []
+    seen := Map()
+    for row in rows {
+        item := _imageList[row]
+        EnsureTimesheetFields(item)
+        if !seen.Has(item.tsLayer) {
+            seen[item.tsLayer] := true
+            layers.Push(item.tsLayer)
+        }
+    }
+    return layers
+}
+
+NormalizeTimesheetLayerTimings(layers := "") {
+    targetLayers := IsObject(layers) ? layers : GetTimesheetLayerOptions()
+    for layer in targetLayers {
+        entries := []
+        for idx, item in _imageList {
+            EnsureTimesheetFields(item)
+            if !item.tsEnabled || item.type != "image" || item.tsLayer != layer
+                continue
+            entries.Push({row: idx, item: item})
+        }
+        Loop entries.Length {
+            swapped := false
+            Loop entries.Length - 1 {
+                left := entries[A_Index].item.tsStartFrame
+                right := entries[A_Index + 1].item.tsStartFrame
+                if left > right {
+                    tmp := entries[A_Index]
+                    entries[A_Index] := entries[A_Index + 1]
+                    entries[A_Index + 1] := tmp
+                    swapped := true
+                }
+            }
+            if !swapped
+                break
+        }
+        prevEnd := 0
+        for entry in entries {
+            item := entry.item
+            if item.tsStartFrame <= prevEnd
+                item.tsStartFrame := prevEnd + 1
+            if item.tsEndFrame < item.tsStartFrame
+                item.tsEndFrame := item.tsStartFrame
+            prevEnd := item.tsEndFrame
+        }
+    }
+}
+
+FindDuplicateTimesheetCell() {
+    seen := Map()
+    for idx, item in _imageList {
+        EnsureTimesheetFields(item)
+        cell := Trim(String(item.tsCell))
+        if !item.tsEnabled || item.type != "image" || cell = ""
+            continue
+        key := item.tsLayer "|" cell
+        if seen.Has(key) {
+            prior := seen[key]
+            sameLinkedGroup := Trim(String(item.linkGroup)) != ""
+                && item.linkGroup = prior.group
+            if !sameLinkedGroup
+                return {row1: prior.row, row2: idx, layer: item.tsLayer, cell: cell}
+        } else {
+            seen[key] := {row: idx, group: Trim(String(item.linkGroup))}
+        }
+    }
+    return ""
+}
+
+ApplyTimesheetEditorToSelected(ts, useOnly := false) {
+    rows := GetSelectedListRows(ts.lv)
+    if rows.Length = 0
+        return
+    layer := ts.ddlLayer.Text
+    kind := ts.ddlKind.Text
+    cell := Trim(ts.edCell.Value)
+    startFrame := ts.edStart.Value ~= "^\d+$" ? Integer(ts.edStart.Value) : 1
+    endFrame := ts.edEnd.Value ~= "^\d+$" ? Integer(ts.edEnd.Value) : startFrame
+    if startFrame < 1
+        startFrame := 1
+    if endFrame < startFrame
+        endFrame := startFrame
+    useState := ts.chkUse.Value = 1
+    if !TimesheetRowsNeedChange(rows, useState, useOnly, layer, kind, cell, startFrame, endFrame)
+        return
+    PushUndoState(ts.mainGui)
+    snapshot := SnapshotTimesheetRows(rows)
+
+    for row in rows {
+        item := _imageList[row]
+        EnsureTimesheetFields(item)
+        wasEnabled := item.tsEnabled
+        item.tsEnabled := useState
+        if useOnly {
+            if useState && !wasEnabled {
+                item.tsStartFrame := startFrame
+                if item.tsEndFrame < item.tsStartFrame
+                    item.tsEndFrame := item.tsStartFrame
+            }
+        } else {
+            item.tsLayer := layer
+            item.tsKind := kind
+            item.tsCell := cell
+            item.tsStartFrame := startFrame
+            item.tsEndFrame := endFrame
+        }
+    }
+    SyncLinkedDuplicateCells(rows)
+    NormalizeTimesheetLayerTimings(CollectAffectedTimesheetLayers(rows))
+    dup := FindDuplicateTimesheetCell()
+    if IsObject(dup) {
+        RestoreTimesheetRows(snapshot)
+        ReloadTimesheetList(ts)
+        for row in rows
+            ts.lv.Modify(row, "Select")
+        ts.lv.Modify(rows[1], "Focus Vis")
+        LoadTimesheetEditorFromRows(ts)
+        MsgBox "Duplicate cell " dup.cell " is not allowed in layer " dup.layer ".", "Timesheet Duplicate Cell", "Icon!"
+        return
+    }
+    ReloadTimesheetList(ts)
+    for row in rows
+        ts.lv.Modify(row, "Select")
+    ts.lv.Modify(rows[1], "Focus Vis")
+    LoadTimesheetEditorFromRows(ts)
+    UpdateListViewRows(ts.mainGui, rows)
+    RefreshTimeline(ts.mainGui)
+}
+
+AutoDetectTimesheetRows(ts, selectedOnly := false) {
+    rows := selectedOnly ? GetSelectedListRows(ts.lv) : []
+    if !selectedOnly {
+        Loop _imageList.Length
+            rows.Push(A_Index)
+    }
+    if rows.Length = 0
+        return
+    PushUndoState(ts.mainGui)
+    snapshot := SnapshotTimesheetRows(rows)
+    for row in rows {
+        item := _imageList[row]
+        EnsureTimesheetFields(item)
+        if AutoDetectTimesheetFromName(item.name, &layer, &cell) {
+            item.tsEnabled := true
+            item.tsLayer := layer
+            item.tsKind := "Key"
+            item.tsCell := cell
+            if item.tsEndFrame < item.tsStartFrame
+                item.tsEndFrame := item.tsStartFrame
+        }
+    }
+    SyncLinkedDuplicateCells(rows)
+    NormalizeTimesheetLayerTimings(CollectAffectedTimesheetLayers(rows))
+    dup := FindDuplicateTimesheetCell()
+    if IsObject(dup) {
+        RestoreTimesheetRows(snapshot)
+        ReloadTimesheetList(ts)
+        for row in rows
+            ts.lv.Modify(row, "Select")
+        ts.lv.Modify(rows[1], "Focus Vis")
+        LoadTimesheetEditorFromRows(ts)
+        MsgBox "Duplicate cell " dup.cell " is not allowed in layer " dup.layer ".", "Timesheet Duplicate Cell", "Icon!"
+        return
+    }
+    ReloadTimesheetList(ts)
+    for row in rows
+        ts.lv.Modify(row, "Select")
+    ts.lv.Modify(rows[1], "Focus Vis")
+    LoadTimesheetEditorFromRows(ts)
+    UpdateListViewRows(ts.mainGui, rows)
+    RefreshTimeline(ts.mainGui)
+}
+
+FillMissingTimesheetEnds(ts) {
+    PushUndoState(ts.mainGui)
+    for item in _imageList {
+        EnsureTimesheetFields(item)
+        if item.tsEndFrame < item.tsStartFrame
+            item.tsEndFrame := item.tsStartFrame
+    }
+    ReloadTimesheetList(ts)
+    LoadTimesheetEditorFromRows(ts)
+    SyncListViewToModel(ts.mainGui)
+    RefreshTimeline(ts.mainGui)
+}
+
+GetActiveTimesheetItemForLayerFrame(layer, frameNo) {
+    for item in _imageList {
+        EnsureTimesheetFields(item)
+        if !item.tsEnabled || item.type != "image"
+            continue
+        if item.tsLayer = layer && frameNo >= item.tsStartFrame && frameNo <= item.tsEndFrame
+            return item
+    }
+    return ""
+}
+
+GetTimesheetPreviewLayers() {
+    hasAny := false
+    for item in _imageList {
+        EnsureTimesheetFields(item)
+        if item.tsEnabled && item.type = "image" {
+            hasAny := true
+            break
+        }
+    }
+    if !hasAny
+        return []
+
+    layers := []
+    for layer in GetTimesheetLayerOptions() {
+        if IsDefaultVisibleTimesheetLayer(layer) || HasTimesheetLayerUsage(layer)
+            layers.Push(layer)
+    }
+    return layers
+}
+
+HasTimesheetLayerUsage(layer) {
+    for item in _imageList {
+        EnsureTimesheetFields(item)
+        if item.tsEnabled && item.type = "image" && item.tsLayer = layer
+            return true
+    }
+    return false
+}
+
+GetTimesheetLayerLabel(layer) {
+    if RegExMatch(layer, "^(.)_shita$", &m)
+        return m[1] "-"
+    if RegExMatch(layer, "^(.)_ue$", &m)
+        return m[1] "+"
+    return layer
+}
+
+GetKeyframeToken(cell) {
+    cell := Trim(String(cell))
+    if cell = ""
+        cell := "?"
+    return Chr(8226) cell
+}
+
+ShowTimesheetPreview(ts) {
+    preview := Gui("+Owner" ts.Hwnd, "Timesheet Preview")
+    preview.BackColor := "F8F3E7"
+    preview.SetFont("s10", "Consolas")
+    preview.MarginX := 12
+    preview.MarginY := 10
+    preview.previewText := BuildTimesheetPreviewTextV2()
+    preview.txtEdit := preview.AddEdit("x12 y12 w760 h600 ReadOnly -Wrap BackgroundFFFFFF c000000", preview.previewText)
+    preview.btnSaveTxt := preview.AddButton("x12 y622 w100 h28", "Save TXT")
+    preview.btnSavePng := preview.AddButton("x120 y622 w100 h28", "Save PNG")
+    preview.btnClose := preview.AddButton("x652 y622 w120 h28", "Close")
+    preview.btnSaveTxt.OnEvent("Click", (*) => ExportTimesheetPreviewText(preview))
+    preview.btnSavePng.OnEvent("Click", (*) => ExportTimesheetPreviewImage(preview))
+    preview.btnClose.OnEvent("Click", (*) => preview.Destroy())
+    preview.Show("w784 h664")
+}
+
+PadPreviewToken(text, width) {
+    text := String(text)
+    if StrLen(text) >= width
+        return text
+    return SubStr("                    ", 1, width - StrLen(text)) text
+}
+
+BuildTimesheetPreviewTextV2() {
+    layers := GetTimesheetPreviewLayers()
+    if layers.Length = 0
+        return "No enabled timesheet rows yet."
+
+    total := GetTimesheetTotalFrames()
+    colW := 6
+    frameW := 3
+    header1 := PadPreviewToken("Fr", frameW) " |"
+    header2 := SubStr("------", 1, frameW) "-+"
+    for layer in layers {
+        label := PadPreviewToken(GetTimesheetLayerLabel(layer), colW)
+        header1 .= label
+        header2 .= SubStr("---------------", 1, colW)
+    }
+    out := header1 "`r`n" header2 "`r`n"
+
+    Loop total {
+        frameNo := A_Index
+        line := PadPreviewToken(frameNo, frameW) " |"
+        for layer in layers {
+            item := GetActiveTimesheetItemForLayerFrame(layer, frameNo)
+            prev := frameNo > 1 ? GetActiveTimesheetItemForLayerFrame(layer, frameNo - 1) : ""
+            if IsObject(item) {
+                startOfBlock := !IsObject(prev) || prev != item
+                if startOfBlock {
+                    cell := item.tsCell != "" ? item.tsCell : "?"
+                    token := item.tsKind = "Inbetween" ? cell : GetKeyframeToken(cell)
+                } else {
+                    token := "│"
+                }
+            } else {
+                token := (frameNo = 1 || IsObject(prev)) ? "X" : "~"
+            }
+            line .= PadPreviewToken(token, colW)
+        }
+        out .= line "`r`n"
+    }
+
+    out .= "`r`nLegend:`r`n"
+        . "number with " Chr(8226) " = keyframe`r`n"
+        . "plain number = inbetween`r`n"
+        . "X = empty frame start`r`n"
+        . "│ = held frame continuation`r`n"
+        . "~ = empty continuation"
+    return out
+}
+
+ExportTimesheetPreviewText(preview) {
+    path := FileSelect("S16", _OUTPUT_DIR "\timesheet_preview.txt", "Save Timesheet Preview", "Text (*.txt)")
+    if path = ""
+        return
+    text := preview.HasProp("previewText") ? preview.previewText : preview.txtEdit.Value
+    FileDeleteSafe(path)
+    FileAppend(text, path, "UTF-8")
+}
+
+ExportTimesheetPreviewImage(preview) {
+    path := FileSelect("S16", _OUTPUT_DIR "\timesheet_preview.png", "Save Timesheet Preview Image", "PNG (*.png)")
+    if path = ""
+        return
+    text := preview.HasProp("previewText") ? preview.previewText : preview.txtEdit.Value
+    if RenderTextPreviewToPng(text, path)
+        return
+    MsgBox "Failed to export preview image.", "Timesheet Preview", "IconX"
+}
+
+RenderTextPreviewToPng(text, destPath) {
+    txtPath := A_Temp "\NastarxaIC_preview_" A_TickCount ".txt"
+    scriptPath := A_Temp "\NastarxaIC_preview_" A_TickCount ".ps1"
+    q := Chr(34)
+    try {
+        FileDeleteSafe(txtPath)
+        FileDeleteSafe(scriptPath)
+        FileAppend(text, txtPath, "UTF-8")
+        psLines := [
+            "param([string]$txtPath,[string]$pngPath)",
+            "Add-Type -AssemblyName System.Drawing",
+            "$text = [System.IO.File]::ReadAllText($txtPath, [System.Text.Encoding]::UTF8)",
+            "$lines = $text -split '\r?\n'",
+            "if ($lines.Length -eq 0) { $lines = @('') }",
+            "$font = New-Object System.Drawing.Font('Consolas', 16, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)",
+            "$bmp0 = New-Object System.Drawing.Bitmap(4,4)",
+            "$g0 = [System.Drawing.Graphics]::FromImage($bmp0)",
+            "$g0.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit",
+            "$maxWidth = 0.0",
+            "foreach ($line in $lines) {",
+            "    $size = $g0.MeasureString($line, $font)",
+            "    if ($size.Width -gt $maxWidth) { $maxWidth = $size.Width }",
+            "}",
+            "$lineHeight = [Math]::Ceiling($font.GetHeight($g0) + 4)",
+            "$g0.Dispose()",
+            "$bmp0.Dispose()",
+            "$margin = 16",
+            "$width = [Math]::Max(320, [int][Math]::Ceiling($maxWidth) + ($margin * 2))",
+            "$height = [Math]::Max(180, ($lines.Length * $lineHeight) + ($margin * 2))",
+            "$bmp = New-Object System.Drawing.Bitmap($width, $height)",
+            "$g = [System.Drawing.Graphics]::FromImage($bmp)",
+            "$g.Clear([System.Drawing.Color]::White)",
+            "$g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit",
+            "$brush = [System.Drawing.Brushes]::Black",
+            "for ($i = 0; $i -lt $lines.Length; $i++) {",
+            "    $g.DrawString($lines[$i], $font, $brush, $margin, $margin + ($i * $lineHeight))",
+            "}",
+            "$bmp.Save($pngPath, [System.Drawing.Imaging.ImageFormat]::Png)",
+            "$g.Dispose()",
+            "$bmp.Dispose()",
+            "$font.Dispose()"
+        ]
+        ps := JoinText(psLines, "`r`n")
+        FileAppend(ps, scriptPath, "UTF-8")
+        cmd := "powershell.exe -NoProfile -ExecutionPolicy Bypass -File " q scriptPath q " " q txtPath q " " q destPath q
+        result := RunWait(cmd, , "Hide")
+        return result = 0 && FileExist(destPath)
+    } finally {
+        FileDeleteSafe(txtPath)
+        FileDeleteSafe(scriptPath)
+    }
+}
+
+FileDeleteSafe(path) {
+    try FileDelete(path)
+}
+
 SaveProject(g) {
     path := FileSelect("S16", _OUTPUT_DIR "\project.nfcp", "Save Project", "Project (*.nfcp)")
     if path = ""
@@ -2001,19 +3521,11 @@ SaveProject(g) {
     IniWrite(g.bgEdit.Value, path, "Settings", "BG")
     IniWrite(g.bgAlphaEdit.Value, path, "Settings", "BGAlpha")
     IniWrite(g.audioEdit.Value, path, "Settings", "Audio")
+    IniWrite(g.chkTimesheet.Value, path, "Settings", "TimesheetMode")
+    IniWrite(SerializeTimesheetLayers(), path, "Settings", "TsLayers")
     try FileDelete(_LAST_PROJECT_FILE)
     FileAppend(path, _LAST_PROJECT_FILE)
-    IniWrite(_imageList.Length, path, "Files", "Count")
-    for i, item in _imageList {
-        prefix := "Item" i
-        IniWrite(item.path, path, "Files", prefix "_Path")
-        IniWrite(item.exposure, path, "Files", prefix "_Exposure")
-        IniWrite(item.type, path, "Files", prefix "_Type")
-        IniWrite(item.HasProp("frameCount") ? item.frameCount : 0, path, "Files", prefix "_FrameCount")
-        IniWrite(item.HasProp("durationSec") ? item.durationSec : 0, path, "Files", prefix "_DurationSec")
-        IniWrite(item.HasProp("previewFrame") ? item.previewFrame : 1, path, "Files", prefix "_PreviewFrame")
-        IniWrite(item.HasProp("note") ? item.note : "", path, "Files", prefix "_Note")
-    }
+    WriteQueueItemsToIni(path, "Files")
     g.statText.Value := "Project saved"
 }
 
@@ -2029,6 +3541,7 @@ LoadProjectFromPath(g, path) {
     global _imageList
     global _selectedRow
     try {
+        PushUndoState(g)
         g.fpsEdit.Value := IniRead(path, "Settings", "FPS", "24")
         g.widthEdit.Value := IniRead(path, "Settings", "Width", "1920")
         g.heightEdit.Value := IniRead(path, "Settings", "Height", "1080")
@@ -2048,57 +3561,46 @@ LoadProjectFromPath(g, path) {
         g.bgEdit.Value := NormalizeHexColor(IniRead(path, "Settings", "BG", "#FFFFFF"))
         g.bgAlphaEdit.Value := IniRead(path, "Settings", "BGAlpha", "FF")
         g.audioEdit.Value := IniRead(path, "Settings", "Audio", "")
+        g.chkTimesheet.Value := Integer(IniRead(path, "Settings", "TimesheetMode", "0"))
+        LoadTimesheetLayersFromString(IniRead(path, "Settings", "TsLayers", SerializeTimesheetLayers()))
 
-        count := Integer(IniRead(path, "Files", "Count", "0"))
-        _imageList := []
-        Loop count {
-            prefix := "Item" A_Index
-            itemPath := IniRead(path, "Files", prefix "_Path", "")
-            if itemPath != "" {
-                SplitPath(itemPath, &name)
-                itemType := IniRead(path, "Files", prefix "_Type", "image")
-                item := {
-                    path: itemPath,
-                    name: name,
-                    exposure: Integer(IniRead(path, "Files", prefix "_Exposure", "2")),
-                    type: itemType,
-                    note: IniRead(path, "Files", prefix "_Note", "")
-                }
-                if itemType = "video" {
-                    item.frameCount := Integer(IniRead(path, "Files", prefix "_FrameCount", "0"))
-                    item.durationSec := Float(IniRead(path, "Files", prefix "_DurationSec", "0"))
-                    item.previewFrame := Integer(IniRead(path, "Files", prefix "_PreviewFrame", "1"))
-                }
-                _imageList.Push(item)
-                continue
-            }
-
+        _imageList := ReadQueueItemsFromIni(path, "Files")
+        if _imageList.Length = 0 {
+            count := Integer(IniRead(path, "Files", "Count", "0"))
+            Loop count {
+                prefix := "Item" A_Index
             ; Backward-compatible loader for older project files.
-            raw := IniRead(path, "Files", prefix, "")
-            parts := StrSplit(raw, "|||")
-            if parts.Length >= 2 {
-                SplitPath(parts[1], &name)
-                item := {path: parts[1], name: name, exposure: Integer(parts[2]), type: "image", note: parts.Length >= 5 ? parts[5] : ""}
-                if parts.Length >= 3 && parts[3] = "video" {
-                    item.type := "video"
-                    item.frameCount := parts.Length >= 4 ? Integer(parts[4]) : 0
-                    item.durationSec := 0
-                    item.previewFrame := 1
-                } else if parts.Length >= 3 {
-                    item.type := parts[3]
-                    if parts[3] = "video" {
+                raw := IniRead(path, "Files", prefix, "")
+                parts := StrSplit(raw, "|||")
+                if parts.Length >= 2 {
+                    SplitPath(parts[1], &name)
+                    item := {path: parts[1], name: name, exposure: Integer(parts[2]), type: "image", note: parts.Length >= 5 ? parts[5] : ""}
+                    EnsureTimesheetFields(item)
+                    if parts.Length >= 3 && parts[3] = "video" {
+                        item.type := "video"
                         item.frameCount := parts.Length >= 4 ? Integer(parts[4]) : 0
                         item.durationSec := 0
                         item.previewFrame := 1
+                    } else if parts.Length >= 3 {
+                        item.type := parts[3]
+                        if parts[3] = "video" {
+                            item.frameCount := parts.Length >= 4 ? Integer(parts[4]) : 0
+                            item.durationSec := 0
+                            item.previewFrame := 1
+                        }
                     }
+                    _imageList.Push(item)
                 }
-                _imageList.Push(item)
             }
         }
+        SyncLinkedDuplicateCells()
+        NormalizeTimesheetLayerTimings()
         _selectedRow := 0
         SyncListViewToModel(g)
         RefreshTimeline(g)
         UpdatePreview(g)
+        g.btnTimesheet.Enabled := g.chkTimesheet.Value = 1
+        ApplyTimesheetModeUI(g)
         g.statText.Value := "Loaded " _imageList.Length " item(s)"
         try FileDelete(_LAST_PROJECT_FILE)
         FileAppend(path, _LAST_PROJECT_FILE)
