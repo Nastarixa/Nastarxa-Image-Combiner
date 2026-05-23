@@ -61,6 +61,9 @@ GetFFmpegPathForFormat(fmt := "") {
     if fmt = "MP4" || fmt = "AVI" {
         if path := FindFFmpegWithEncoder("libx264")
             return path
+    } else if fmt = "MOV" {
+        if path := FindFFmpegWithEncoder("qtrle")
+            return path
     } else if fmt = "WebM" {
         if path := FindFFmpegWithEncoder("libvpx")
             return path
@@ -241,6 +244,7 @@ BuildGui() {
     g.chkMP4  := g.AddCheckbox("x" rx+96  " y62 w48 cFFFFFF Checked", "MP4")
     g.chkAVI  := g.AddCheckbox("x" rx+148 " y62 w42 cFFFFFF", "AVI")
     g.chkWebM := g.AddCheckbox("x" rx+194 " y62 w60 cFFFFFF", "WebM")
+    g.chkMOV  := g.AddCheckbox("x" rx+260 " y62 w54 cFFFFFF", "MOV")
 
     g.chkPNG := g.AddCheckbox(
         "x" rx+48 " y84 w50 cFFFFFF",
@@ -504,6 +508,7 @@ BuildGui() {
     g.chkMP4.OnEvent("Click", (*) => g.Progress.Value := 0)
     g.chkAVI.OnEvent("Click", (*) => g.Progress.Value := 0)
     g.chkWebM.OnEvent("Click", (*) => g.Progress.Value := 0)
+    g.chkMOV.OnEvent("Click", (*) => g.Progress.Value := 0)
     g.chkPNG.OnEvent("Click", (*) => g.Progress.Value := 0)
     g.chkSheet.OnEvent("Click", (*) => g.Progress.Value := 0)
     g.chkTimesheet.OnEvent("Click", (*) => ToggleTimesheetMode(g))
@@ -581,7 +586,7 @@ DropFiles(g, files) {
 IsValidFile(path) {
     SplitPath(path, , , &ext)
     ext := "." StrLower(ext)
-    static valid := ["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif", "mp4"]
+    static valid := ["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif", "mp4", "mov"]
     for v in valid {
         if ext = "." v
             return true
@@ -592,11 +597,11 @@ IsValidFile(path) {
 IsVideoFile(path) {
     SplitPath(path, , , &ext)
     ext := StrLower(ext)
-    return ext = "mp4" || ext = "gif"
+    return ext = "mp4" || ext = "gif" || ext = "mov"
 }
 
 OnAddImages(g) {
-    files := FileSelect("M", , "Select Images", "Media (*.png; *.jpg; *.jpeg; *.bmp; *.tif; *.tiff; *.webp; *.gif; *.mp4)")
+    files := FileSelect("M", , "Select Images", "Media (*.png; *.jpg; *.jpeg; *.bmp; *.tif; *.tiff; *.webp; *.gif; *.mp4; *.mov)")
     if files = ""
         return
     g.Progress.Value := 0
@@ -1546,6 +1551,7 @@ CaptureAppState(g) {
         fmtMP4: g.chkMP4.Value,
         fmtAVI: g.chkAVI.Value,
         fmtWebM: g.chkWebM.Value,
+        fmtMOV: g.chkMOV.Value,
         fmtPNG: g.chkPNG.Value,
         fmtSheet: g.chkSheet.Value,
         sheetCount: g.sheetCountEdit.Value,
@@ -1600,6 +1606,7 @@ RestoreAppState(g, state) {
         g.chkMP4.Value := state.fmtMP4
         g.chkAVI.Value := state.fmtAVI
         g.chkWebM.Value := state.fmtWebM
+        g.chkMOV.Value := state.HasProp("fmtMOV") ? state.fmtMOV : 0
         g.chkPNG.Value := state.fmtPNG
         g.chkSheet.Value := state.fmtSheet
         g.sheetCountEdit.Value := state.sheetCount
@@ -1701,6 +1708,7 @@ SavePreset(g) {
     IniWrite(g.chkMP4.Value, _PRESET_FILE, name, "FmtMP4")
     IniWrite(g.chkAVI.Value, _PRESET_FILE, name, "FmtAVI")
     IniWrite(g.chkWebM.Value, _PRESET_FILE, name, "FmtWebM")
+    IniWrite(g.chkMOV.Value, _PRESET_FILE, name, "FmtMOV")
     IniWrite(g.chkPNG.Value, _PRESET_FILE, name, "FmtPNG")
     IniWrite(g.chkSheet.Value, _PRESET_FILE, name, "FmtSheet")
     IniWrite(g.sheetCountEdit.Value, _PRESET_FILE, name, "SheetCount")
@@ -1744,6 +1752,7 @@ LoadPreset(g) {
     g.chkMP4.Value := Integer(IniRead(_PRESET_FILE, sel, "FmtMP4", "1"))
     g.chkAVI.Value := Integer(IniRead(_PRESET_FILE, sel, "FmtAVI", "0"))
     g.chkWebM.Value := Integer(IniRead(_PRESET_FILE, sel, "FmtWebM", "0"))
+    g.chkMOV.Value := Integer(IniRead(_PRESET_FILE, sel, "FmtMOV", "0"))
     g.chkPNG.Value := Integer(IniRead(_PRESET_FILE, sel, "FmtPNG", "0"))
     g.chkSheet.Value := Integer(IniRead(_PRESET_FILE, sel, "FmtSheet", "0"))
     g.sheetCountEdit.Value := IniRead(_PRESET_FILE, sel, "SheetCount", "16")
@@ -1870,11 +1879,17 @@ GetCheckedFormats(g) {
         fmts.Push("AVI")
     if g.chkWebM.Value
         fmts.Push("WebM")
+    if g.chkMOV.Value
+        fmts.Push("MOV")
     if g.chkPNG.Value
         fmts.Push("PNGSEQ")
     if g.chkSheet.Value
         fmts.Push("CONTACT")
     return fmts
+}
+
+FormatSupportsTrueAlpha(fmt) {
+    return fmt = "MOV" || fmt = "PNGSEQ" || fmt = "CONTACT"
 }
 
 IsTimesheetMode(g) {
@@ -2036,6 +2051,10 @@ Generate(g) {
         MsgBox "Select at least one output format.", "No Format", "Icon!"
         return
     }
+    if g.chkMOV.Value && !FFmpegHasEncoder(GetFFmpegPathForFormat("MOV"), "qtrle") {
+        MsgBox "QuickTime MOV export needs an ffmpeg build with the qtrle encoder.", "MOV Export Unavailable", "IconX"
+        return
+    }
     if IsTimesheetMode(g) {
         tsTotal := GetTimesheetTotalFrames()
         if tsTotal < 1 {
@@ -2083,6 +2102,17 @@ Generate(g) {
     bgColor := GetBGColor(g)
     audioPath := g.audioEdit.Value
     _cancelGenerate := false
+
+    if StrLen(bgColor) = 9 && SubStr(bgColor, 8, 2) != "FF" {
+        alphaUnsupported := []
+        for fmt in fmts {
+            if !FormatSupportsTrueAlpha(fmt)
+                alphaUnsupported.Push(fmt)
+        }
+        if alphaUnsupported.Length > 0 {
+            MsgBox "BG alpha will be preserved only for MOV, PNG, and Contact Sheet.`n`nThese selected formats do not keep true alpha:`n" JoinText(alphaUnsupported, ", "), "Alpha Format Warning", "Icon!"
+        }
+    }
 
     tempDir := A_Temp "\NastarxaIC_" A_TickCount
     DirCreate(tempDir)
@@ -2201,10 +2231,20 @@ RunGenerate(g, outDir, outName, fmts, fps, w, h, fitMode, bgColor, audioPath, te
         if fmt = "PNGSEQ" {
             seqDir := outPath
             DirCreate(seqDir)
-            Loop Files, tempDir "\*.png", "F"
-                try FileCopy(A_LoopFileFullPath, seqDir "\" A_LoopFileName, 1)
-            successCount++
-            generatedCount++
+            cmd := BuildPngSequenceCmd(w, h, fitMode, bgColor, tempDir, seqDir)
+            errLog := tempDir "\ffmpeg_err.log"
+            ffmpegPath := GetFFmpegPathForFormat(fmt)
+            result := RunFFmpegLogged(cmd, errLog, tempDir, ffmpegPath)
+            if result = 0 {
+                successCount++
+                generatedCount++
+            } else {
+                failCount++
+                errText := ""
+                try errText := FileRead(errLog)
+                errMsg := errText != "" ? errText : "exit code " result
+                MsgBox "Failed to encode " fmt ".`n" errMsg, "ffmpeg Error", "IconX"
+            }
             continue
         }
         if fmt = "CONTACT" {
@@ -2342,6 +2382,34 @@ BuildScaleFilter(w, h, fitMode, bgColor) {
     }
 }
 
+BuildAlphaScaleFilter(w, h, fitMode) {
+    if w <= 0 || h <= 0
+        return ""
+    transparent := "0x00000000"
+    switch fitMode {
+        case "contain", "pad":
+            return "scale=" w ":" h ":force_original_aspect_ratio=decrease,pad=" w ":" h ":(ow-iw)/2:(oh-ih)/2:" transparent
+        case "cover":
+            return "scale=" w ":" h ":force_original_aspect_ratio=increase,crop=" w ":" h
+        default:
+            return "scale=" w ":" h
+    }
+}
+
+BuildPngSequenceCmd(w, h, fitMode, bgColor, inputDir, outputDir) {
+    q := Chr(34)
+    inPattern := q inputDir "\%06d.png" q
+    outPattern := q outputDir "\%06d.png" q
+    scaleFilter := BuildScaleFilter(w, h, fitMode, bgColor)
+    args := "-y -i " inPattern
+    if scaleFilter != ""
+        args .= " -vf " q scaleFilter ",format=rgba" q
+    else
+        args .= " -vf " q "format=rgba" q
+    args .= " -pix_fmt rgba " outPattern
+    return args
+}
+
 BuildVideoEncodeFilter(scaleFilter := "") {
     evenFilter := "pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0"
     if scaleFilter = ""
@@ -2354,9 +2422,10 @@ BuildFFmpegCmd(fmt, fps, w, h, fitMode, bgColor, loopVal, crf, audioPath, inputD
     inPattern := q inputDir "\%06d.png" q
     out := q outputPath q
     scaleFilter := BuildScaleFilter(w, h, fitMode, bgColor)
+    alphaScaleFilter := BuildAlphaScaleFilter(w, h, fitMode)
     videoFilter := BuildVideoEncodeFilter(scaleFilter)
     audioArgs := ""
-    if (fmt = "MP4" || fmt = "WebM") && audioPath != "" && FileExist(audioPath)
+    if (fmt = "MP4" || fmt = "WebM" || fmt = "MOV") && audioPath != "" && FileExist(audioPath)
         audioArgs := " -i " q audioPath q " -shortest"
     switch fmt {
         case "GIF":
@@ -2366,14 +2435,16 @@ BuildFFmpegCmd(fmt, fps, w, h, fitMode, bgColor, loopVal, crf, audioPath, inputD
                 filter := q scaleFilter ",split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" q
             cmd1 := "-y -framerate " fps " -i " inPattern " -vf " filter " -loop " gifLoop " " out
         case "MP4":
-            cmd1 := "-y -framerate " fps " -i " inPattern audioArgs " -c:v libx264 -pix_fmt yuv420p -crf " crf " -movflags +faststart " out
             cmd1 := "-y -framerate " fps " -i " inPattern audioArgs " -vf " q videoFilter q " -c:v libx264 -pix_fmt yuv420p -crf " crf " -movflags +faststart " out
         case "AVI":
-            cmd1 := "-y -framerate " fps " -i " inPattern " -c:v libx264 -pix_fmt yuv420p -crf " crf " " out
             cmd1 := "-y -framerate " fps " -i " inPattern " -vf " q videoFilter q " -c:v libx264 -pix_fmt yuv420p -crf " crf " " out
         case "WebM":
-            cmd1 := "-y -framerate " fps " -i " inPattern audioArgs " -c:v libvpx -pix_fmt yuv420p -auto-alt-ref 0 -b:v 1M -crf " crf " " out
             cmd1 := "-y -framerate " fps " -i " inPattern audioArgs " -vf " q videoFilter q " -c:v libvpx -pix_fmt yuv420p -auto-alt-ref 0 -b:v 1M -crf " crf " " out
+        case "MOV":
+            movAudio := audioArgs != "" ? " -c:a pcm_s16le" : ""
+            cmd1 := "-y -framerate " fps " -i " inPattern audioArgs " -c:v qtrle -pix_fmt argb" movAudio " " out
+            if alphaScaleFilter != ""
+                cmd1 := "-y -framerate " fps " -i " inPattern audioArgs " -vf " q alphaScaleFilter q " -c:v qtrle -pix_fmt argb" movAudio " " out
         default:
             cmd1 := "-y -framerate " fps " -i " inPattern " " out
             if scaleFilter != ""
@@ -2391,8 +2462,8 @@ BuildContactSheetCmd(fps, w, h, fitMode, bgColor, inputDir, outputPath, frameCou
     tileW := w > 0 ? Max(1, w // cols) : 320
     tileH := h > 0 ? Max(1, h // rows) : 180
     scaleFilter := BuildScaleFilter(tileW, tileH, "contain", bgColor)
-    vf := scaleFilter != "" ? scaleFilter ",tile=" cols "x" rows : "tile=" cols "x" rows
-    return "-y -framerate " fps " -start_number " startNum " -i " inPattern " -vf " q vf q " -frames:v 1 " out
+    vf := scaleFilter != "" ? scaleFilter ",format=rgba,tile=" cols "x" rows : "format=rgba,tile=" cols "x" rows
+    return "-y -framerate " fps " -start_number " startNum " -i " inPattern " -vf " q vf q " -frames:v 1 -pix_fmt rgba " out
 }
 
 
@@ -2491,6 +2562,7 @@ ApplyLayout(g, aW, aH) {
     g.chkMP4.Move(rightX + 108, row2Y, 56)
     g.chkAVI.Move(rightX + 168, row2Y, 50)
     g.chkWebM.Move(rightX + 224, row2Y, 66)
+    g.chkMOV.Move(rightX + 294, row2Y, 58)
     g.chkPNG.Move(rightX + labelW, row2Y + 26, 54)
     g.chkSheet.Move(rightX + 108, row2Y + 26, 62)
     g.sheetCountEdit.Move(rightX + 176, row2Y + 26, 48)
@@ -2638,6 +2710,7 @@ FormatExt(fmt) {
         case "MP4": return "mp4"
         case "AVI": return "avi"
         case "WebM": return "webm"
+        case "MOV": return "mov"
         case "CONTACT": return "png"
     }
     return "mp4"
@@ -3544,6 +3617,7 @@ SaveProject(g) {
     IniWrite(g.chkMP4.Value, path, "Settings", "FmtMP4")
     IniWrite(g.chkAVI.Value, path, "Settings", "FmtAVI")
     IniWrite(g.chkWebM.Value, path, "Settings", "FmtWebM")
+    IniWrite(g.chkMOV.Value, path, "Settings", "FmtMOV")
     IniWrite(g.chkPNG.Value, path, "Settings", "FmtPNG")
     IniWrite(g.chkSheet.Value, path, "Settings", "FmtSheet")
     IniWrite(g.sheetCountEdit.Value, path, "Settings", "SheetCount")
@@ -3584,6 +3658,7 @@ LoadProjectFromPath(g, path) {
         g.chkMP4.Value := Integer(IniRead(path, "Settings", "FmtMP4", "1"))
         g.chkAVI.Value := Integer(IniRead(path, "Settings", "FmtAVI", "0"))
         g.chkWebM.Value := Integer(IniRead(path, "Settings", "FmtWebM", "0"))
+        g.chkMOV.Value := Integer(IniRead(path, "Settings", "FmtMOV", "0"))
         g.chkPNG.Value := Integer(IniRead(path, "Settings", "FmtPNG", "0"))
         g.chkSheet.Value := Integer(IniRead(path, "Settings", "FmtSheet", "0"))
         g.sheetCountEdit.Value := IniRead(path, "Settings", "SheetCount", "16")
