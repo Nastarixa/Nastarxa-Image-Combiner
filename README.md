@@ -42,7 +42,7 @@ Supports:
 * MP4
 * AVI
 * WebM
-* MOV Quicktime
+* QuickTime MOV (transparent)
 * PNG sequence
 * Contact sheet
 
