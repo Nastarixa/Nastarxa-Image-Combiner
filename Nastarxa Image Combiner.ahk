@@ -528,9 +528,12 @@ BuildGui() {
     g.Show("Hide w1180 h680 Center")
 
     HotIfWinActive("ahk_id " g.Hwnd)
-    Hotkey("Delete", (*) => RemoveSelected(g))
-    Hotkey("*^z", (*) => (CommitActiveTimesheetPending(true), UndoAction(g)))
-    Hotkey("*^+z", (*) => (CommitActiveTimesheetPending(true), RedoAction(g)))
+    Hotkey("Delete", (*) => HandleCombinerDelete(g))
+    Hotkey("*^z", (*) => HandleCombinerUndo(g))
+    Hotkey("*^+z", (*) => HandleCombinerRedo(g))
+    HotIfWinActive("Timesheet Layer Setup")
+    Hotkey("*^z", (*) => HandleCombinerUndo(g))
+    Hotkey("*^+z", (*) => HandleCombinerRedo(g))
     Hotkey("~Enter", (*) => CommitTimesheetEditorEnter())
     Hotkey("~NumpadEnter", (*) => CommitTimesheetEditorEnter())
     HotIfWinActive()
@@ -1494,6 +1497,20 @@ CommitActiveTimesheetPending(force := false) {
     CommitPendingTimesheetFields(_activeTimesheetGui, force)
 }
 
+HandleCombinerDelete(g) {
+    RemoveSelected(g)
+}
+
+HandleCombinerUndo(g) {
+    CommitActiveTimesheetPending(true)
+    UndoAction(g)
+}
+
+HandleCombinerRedo(g) {
+    CommitActiveTimesheetPending(true)
+    RedoAction(g)
+}
+
 CommitTimesheetEditorEnter() {
     global _activeTimesheetGui
     if !IsObject(_activeTimesheetGui)
@@ -1503,6 +1520,14 @@ CommitTimesheetEditorEnter() {
             return
     }
     if !WinActive("ahk_id " _activeTimesheetGui.Hwnd)
+        return
+    focused := ControlGetFocus("ahk_id " _activeTimesheetGui.Hwnd)
+    if focused = ""
+        return
+    if focused != _activeTimesheetGui.edCell.ClassNN
+        && focused != _activeTimesheetGui.edStart.ClassNN
+        && focused != _activeTimesheetGui.edEnd.ClassNN
+        && focused != _activeTimesheetGui.btnApplyText.ClassNN
         return
     CommitPendingTimesheetFields(_activeTimesheetGui, true)
 }
@@ -2692,6 +2717,7 @@ ShowTimesheetSetup(mainGui) {
     ts.edStart := ts.AddEdit("x764 y312 w52 h22 Number BackgroundFFFFFF c000000", "1")
     ts.lblEnd := ts.AddText("x826 y316 c202020", "End")
     ts.edEnd := ts.AddEdit("x856 y312 w52 h22 Number BackgroundFFFFFF c000000", "1")
+    ts.btnApplyText := ts.AddButton("x916 y312 w64 h22", "Apply")
 
     ts.btnAutoSel := ts.AddButton("x24 y352 w144 h26", "Auto Detect Selected")
     ts.btnAutoAll := ts.AddButton("x176 y352 w144 h26", "Auto Detect All")
@@ -2724,22 +2750,18 @@ ShowTimesheetSetup(mainGui) {
     ts.tabs.UseTab()
     ts.btnClose := ts.AddButton("x860 y490 w120 h28", "Close")
 
-    ts.lv.OnEvent("Click", (lv, row) => (CommitPendingTimesheetFields(ts), LoadTimesheetEditorFromRows(ts)))
-    ts.lv.OnEvent("ItemFocus", (lv, row) => row ? (CommitPendingTimesheetFields(ts), LoadTimesheetEditorFromRows(ts)) : 0)
+    ts.lv.OnEvent("Click", (lv, row) => LoadTimesheetEditorFromRows(ts))
+    ts.lv.OnEvent("ItemFocus", (lv, row) => row ? LoadTimesheetEditorFromRows(ts) : 0)
     ts.chkUse.OnEvent("Click", (*) => ApplyTimesheetUseState(ts))
-    ts.ddlLayer.OnEvent("Change", (*) => ScheduleTimesheetFieldApply(ts))
-    ts.ddlLayer.OnEvent("LoseFocus", (*) => CommitPendingTimesheetFields(ts))
+    ts.ddlLayer.OnEvent("Change", (*) => ApplyTimesheetDropdownFields(ts))
     ts.btnLayerUp.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), AddManualTimesheetLayer(ts, true)))
     ts.btnLayerDown.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), AddManualTimesheetLayer(ts, false)))
     ts.btnLayerDel.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), DeleteManualTimesheetLayer(ts)))
-    ts.ddlKind.OnEvent("Change", (*) => ScheduleTimesheetFieldApply(ts))
-    ts.ddlKind.OnEvent("LoseFocus", (*) => CommitPendingTimesheetFields(ts))
+    ts.ddlKind.OnEvent("Change", (*) => ApplyTimesheetDropdownFields(ts))
     ts.edCell.OnEvent("Change", (*) => ScheduleTimesheetFieldApply(ts))
-    ts.edCell.OnEvent("LoseFocus", (*) => CommitPendingTimesheetFields(ts))
     ts.edStart.OnEvent("Change", (*) => ScheduleTimesheetFieldApply(ts))
-    ts.edStart.OnEvent("LoseFocus", (*) => CommitPendingTimesheetFields(ts))
     ts.edEnd.OnEvent("Change", (*) => ScheduleTimesheetFieldApply(ts))
-    ts.edEnd.OnEvent("LoseFocus", (*) => CommitPendingTimesheetFields(ts))
+    ts.btnApplyText.OnEvent("Click", (*) => CommitPendingTimesheetFields(ts, true))
     ts.btnAutoSel.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), AutoDetectTimesheetRows(ts, true)))
     ts.btnAutoAll.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), AutoDetectTimesheetRows(ts, false)))
     ts.btnFillAll.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), FillMissingTimesheetEnds(ts)))
@@ -2857,6 +2879,13 @@ ApplyTimesheetUseState(ts) {
     ApplyTimesheetEditorToSelected(ts, true)
 }
 
+ApplyTimesheetDropdownFields(ts) {
+    rows := GetSelectedListRows(ts.lv)
+    if rows.Length = 0
+        return
+    ApplyTimesheetEditorToSelected(ts, false, true, false)
+}
+
 ScheduleTimesheetFieldApply(ts) {
     if ts.HasProp("_loadingEditor") && ts._loadingEditor
         return
@@ -2878,7 +2907,7 @@ CommitPendingTimesheetFields(ts, force := false) {
     rows := GetSelectedListRows(ts.lv)
     if rows.Length = 0
         return
-    ApplyTimesheetEditorToSelected(ts, false)
+    ApplyTimesheetEditorToSelected(ts, false, false, true)
 }
 
 CloseTimesheetSetup(ts) {
@@ -3030,7 +3059,7 @@ RestoreTimesheetRows(snapshot) {
     }
 }
 
-TimesheetRowsNeedChange(rows, useState, useOnly, layer, kind, cell, startFrame, endFrame) {
+TimesheetRowsNeedChange(rows, useState, useOnly, layer, kind, cell, startFrame, endFrame, applyDropdowns := true, applyText := true) {
     for row in rows {
         item := _imageList[row]
         EnsureTimesheetFields(item)
@@ -3038,15 +3067,15 @@ TimesheetRowsNeedChange(rows, useState, useOnly, layer, kind, cell, startFrame, 
             return true
         if useOnly
             continue
-        if item.tsLayer != layer
+        if applyDropdowns && item.tsLayer != layer
             return true
-        if item.tsKind != kind
+        if applyDropdowns && item.tsKind != kind
             return true
-        if String(item.tsCell) != String(cell)
+        if applyText && String(item.tsCell) != String(cell)
             return true
-        if item.tsStartFrame != startFrame
+        if applyText && item.tsStartFrame != startFrame
             return true
-        if item.tsEndFrame != endFrame
+        if applyText && item.tsEndFrame != endFrame
             return true
     }
     return false
@@ -3174,7 +3203,7 @@ FindDuplicateTimesheetCell() {
     return ""
 }
 
-ApplyTimesheetEditorToSelected(ts, useOnly := false) {
+ApplyTimesheetEditorToSelected(ts, useOnly := false, applyDropdowns := true, applyText := true) {
     rows := GetSelectedListRows(ts.lv)
     if rows.Length = 0
         return
@@ -3188,7 +3217,7 @@ ApplyTimesheetEditorToSelected(ts, useOnly := false) {
     if endFrame < startFrame
         endFrame := startFrame
     useState := ts.chkUse.Value = 1
-    if !TimesheetRowsNeedChange(rows, useState, useOnly, layer, kind, cell, startFrame, endFrame)
+    if !TimesheetRowsNeedChange(rows, useState, useOnly, layer, kind, cell, startFrame, endFrame, applyDropdowns, applyText)
         return
     PushUndoState(ts.mainGui)
     snapshot := SnapshotTimesheetRows(rows)
@@ -3205,11 +3234,15 @@ ApplyTimesheetEditorToSelected(ts, useOnly := false) {
                     item.tsEndFrame := item.tsStartFrame
             }
         } else {
-            item.tsLayer := layer
-            item.tsKind := kind
-            item.tsCell := cell
-            item.tsStartFrame := startFrame
-            item.tsEndFrame := endFrame
+            if applyDropdowns {
+                item.tsLayer := layer
+                item.tsKind := kind
+            }
+            if applyText {
+                item.tsCell := cell
+                item.tsStartFrame := startFrame
+                item.tsEndFrame := endFrame
+            }
         }
     }
     SyncLinkedDuplicateCells(rows)
