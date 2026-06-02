@@ -295,7 +295,7 @@ BuildGui() {
     )
 
     g.chkTimestamp := g.AddCheckbox(
-        "x" rx+166 " y146 w90 cFFFFFF",
+        "x" rx+166 " y146 w55 cFFFFFF",
         "+time"
     )
     g.chkTimesheet := g.AddCheckbox(
@@ -2577,7 +2577,7 @@ ApplyLayout(g, aW, aH) {
 
     g.lblFilename.Move(rightX, row4Y + 4)
     g.outEdit.Move(rightX + labelW, row4Y, 136)
-    g.chkTimestamp.Move(rightX + 191, row4Y + 2, 64)
+    g.chkTimestamp.Move(rightX + 191, row4Y + 2, 55)
     g.chkTimesheet.Move(rightX + 250, row4Y + 2, 38)
     g.btnTimesheet.Move(rightX + 288, row4Y, 72, 24)
 
