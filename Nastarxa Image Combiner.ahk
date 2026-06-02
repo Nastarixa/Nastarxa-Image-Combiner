@@ -3467,6 +3467,7 @@ ShowTimesheetPreview(ts) {
     preview.btnSavePng.OnEvent("Click", (*) => ExportTimesheetPreviewImage(preview))
     preview.btnClose.OnEvent("Click", (*) => preview.Destroy())
     preview.Show("w784 h664")
+    preview.btnClose.Focus()
 }
 
 PadPreviewToken(text, width) {
