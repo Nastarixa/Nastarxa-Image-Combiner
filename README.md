@@ -10,6 +10,7 @@ A Windows desktop tool built with AutoHotkey v2 for combining still images and M
 ## 🖼 Image Preview
 
 ![1](docs/images/1.png)
+![2](docs/images/2.png)
 
 ---
 
@@ -18,7 +19,7 @@ A Windows desktop tool built with AutoHotkey v2 for combining still images and M
 ## 📂 Media Workflow
 
 * Drag & drop files or folders
-* Queue images and MP4 clips
+* Queue images, MP4 clips, and MOV clips
 * Move, duplicate, remove, sort, and reverse items
 * Per-item notes
 * Undo / redo support
@@ -64,7 +65,7 @@ Each row supports:
 
 | Field   | Description          |
 | ------- | -------------------- |
-| `Active`| Enable / disable row |
+| `Active`   | Enable / disable row |
 | `Layer` | Layer assignment     |
 | `Type`  | Timing type          |
 | `Cell`  | Cell number          |
@@ -128,6 +129,8 @@ Preview symbols:
 
 * Contact sheet export uses `contain` fitting
 * MP4 / AVI / WebM auto-pad to even dimensions
+* QuickTime MOV export uses an alpha-capable codec (`qtrle`) with `argb`
+* MOV import is supported for ffmpeg-readable clips, including alpha-capable QuickTime sources
 * Timesheet compositing preserves transparency before merging onto background canvas
 
 ---
