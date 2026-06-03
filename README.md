@@ -1,6 +1,8 @@
 # 🎞️ Nastarxa Image Combiner
 
-A Windows desktop tool built with AutoHotkey v2 for combining still images and MP4 clips into animations, videos, image sequences, and anime-style timesheets.
+> 🎬 Animation and sequence builder for images and videos.
+
+Combine images and MP4 clips into animations, image sequences, videos, and anime-style timesheets.
 
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![Language](https://img.shields.io/badge/language-AutoHotkey_v2-green)
