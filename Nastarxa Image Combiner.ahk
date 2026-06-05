@@ -3,7 +3,7 @@
 TraySetIcon "Combiner.ico"
 
 _FFMPEG := ResolveFFmpegPath()
-_OUTPUT_DIR := A_ScriptDir
+_OUTPUT_DIR := EnvGet("USERPROFILE") "\Videos"
 _imageList := []
 _selectedRow := 0
 _tempDir := ""
@@ -3912,7 +3912,6 @@ ShowTimesheetEditGrid(ts) {
     btnRow1 := 298
     eg.btnMinus := eg.AddButton("x10 y" btnRow1 " w28 h24", "-")
     eg.btnPlus := eg.AddButton("x42 y" btnRow1 " w28 h24", "+")
-    eg.btnKey := eg.AddButton("x96 y" btnRow1 " w28 h24", "X")
 
     btnRow2 := btnRow1 + 32
     eg.btnAuto := eg.AddButton("x10 y" btnRow2 " w130 h26", "Auto-Adjust")
@@ -3922,7 +3921,6 @@ ShowTimesheetEditGrid(ts) {
 
     eg.btnMinus.OnEvent("Click", (*) => RemoveEditGridFrame(eg))
     eg.btnPlus.OnEvent("Click", (*) => AddEditGridFrame(eg))
-    eg.btnKey.OnEvent("Click", (*) => ApplyMarkerToCell(eg, "X"))
     eg.btnAuto.OnEvent("Click", (*) => SmartAutoAdjustEditGrid(eg))
     eg.btnSave.OnEvent("Click", (*) => SaveEditGrid(eg))
     eg.btnHelp.OnEvent("Click", (*) => ShowEditGridHelp())
@@ -3968,65 +3966,6 @@ PadCenter(str, width) {
     Loop left
         result := " " . result
     return result
-}
-
-ApplyMarkerToCell(eg, marker) {
-    layers := eg.layers
-    if layers.Length = 0
-        return
-    text := eg.edit.Value
-    if Trim(text) = ""
-        return
-
-    lines := StrSplit(text, "`n")
-    if lines.Length < 3
-        return
-
-    try {
-        hEdit := eg.edit.Hwnd
-        sel := SendMessage(0x00B0, 0, 0, hEdit)
-        start := sel & 0xFFFF
-        totalLen := StrLen(text)
-        if start > totalLen
-            return
-
-        lineIndex := SendMessage(0x00A9, start, 0, hEdit)
-        if lineIndex < 2 || lineIndex >= lines.Length
-            return
-
-        line := lines[lineIndex + 1]
-        cellIdx := 0
-        pipePos := 0
-        lineStart := SendMessage(0x00BB, lineIndex, 0, hEdit)
-        while (pipePos := InStr(line, "|", , pipePos + 1)) {
-            col := start - lineStart
-            if col < pipePos - 1
-                break
-            cellIdx++
-        }
-        if cellIdx <= 0 || cellIdx > layers.Length
-            return
-
-        parts := StrSplit(line, "|")
-        if cellIdx > parts.Length - 1
-            return
-
-        parts[cellIdx + 1] := " " PadCenter(marker, 5) " "
-
-        newLine := ""
-        for i, p in parts {
-            if i > 1
-                newLine .= "|"
-            newLine .= p
-        }
-        lines[lineIndex + 1] := newLine
-        newText := lines[1]
-        Loop lines.Length - 1
-            newText .= "`n" . lines[A_Index + 1]
-        eg.edit.Value := newText
-
-        SendMessage(0x00B1, start, start, hEdit)
-    }
 }
 
 AddEditGridFrame(eg) {
@@ -4226,9 +4165,14 @@ RestoreItemsFromGrid(grid, layers) {
     global _imageList
 
     regular := []
+    srcLookup := Map()
     for item in _imageList {
-        if item.type = "image" && item.tsEnabled
+        if item.type = "image" && item.tsEnabled {
+            key := item.tsLayer "|" Trim(String(item.tsCell))
+            if !srcLookup.Has(key)
+                srcLookup[key] := item.path
             continue
+        }
         regular.Push(item)
     }
 
@@ -4252,7 +4196,8 @@ RestoreItemsFromGrid(grid, layers) {
             }
             if val = "~" || (val = "X" && entry.frame > startFrame) || (SubStr(val, 1, 1) = "•") {
                 endFrame := entry.frame - 1
-                item := {name: "TS-frame" startFrame, type: "image", exposure: 1, note: "", path: ""
+                srcPath := srcLookup.Has(layer "|" cellNum) ? srcLookup[layer "|" cellNum] : ""
+                item := {name: "TS-frame" startFrame, type: "image", exposure: 1, note: "", path: srcPath
                     , tsEnabled: true, tsLayer: layer, tsCell: cellNum, tsStartFrame: startFrame, tsEndFrame: endFrame, linkGroup: ""}
                 EnsureTimesheetFields(item)
                 newItems.Push(item)
@@ -4270,7 +4215,8 @@ RestoreItemsFromGrid(grid, layers) {
             }
         }
         if startFrame > 0 && grid.Length > 0 {
-            item := {name: "TS-frame" startFrame, type: "image", exposure: 1, note: "", path: ""
+            srcPath := srcLookup.Has(layer "|" cellNum) ? srcLookup[layer "|" cellNum] : ""
+            item := {name: "TS-frame" startFrame, type: "image", exposure: 1, note: "", path: srcPath
                 , tsEnabled: true, tsLayer: layer, tsCell: cellNum, tsStartFrame: startFrame, tsEndFrame: grid[grid.Length].frame, linkGroup: ""}
             EnsureTimesheetFields(item)
             newItems.Push(item)
@@ -4331,7 +4277,6 @@ ShowEditGridHelp() {
         . "  │ or |      Hold / continuation (type | auto-converts to │)`n"
         . "  ~           Empty (no item)`n`n"
         . "Buttons:`n"
-        . "  [X] Insert X at cursor cell`n"
         . "  [+] Add a frame at the end (value from last frame: •N/│ → │, X/~ → ~)`n"
         . "  [-] Remove the last frame`n`n"
         . "Auto-Adjust: re-aligns text, fills empty cells from above, renumbers frames`n"

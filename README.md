@@ -155,7 +155,6 @@ Click `Edit Grid` to open a text-area table editor for the timesheet.
 | ------ | -------- |
 | `[–]` | Remove last frame |
 | `[+]` | Add a frame (value from last frame: •N/│ → │, X/~ → ~) |
-| `[X]` | Replace cell at cursor with `X` |
 | `[Auto-Adjust]` | Re-align columns, renumber frames, fill non-keyframe cells from above |
 | `[Save && Sync]` | Reconstruct items from table text (reverts on duplicate error) |
 
