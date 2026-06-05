@@ -1373,6 +1373,10 @@ UpdatePreview(g) {
     if item.type = "image" {
         SetPreviewSliderState(g, false)
         g.previewPic.Value := ""
+        if !item.HasProp("path") || item.path = "" {
+            g.previewText.Value := item.name " (no file)"
+            return
+        }
         g.previewPic.Value := BuildPreviewPictureValue(item.path, pw, ph)
         dim := GetImageDimensions(item.path)
         warn := GetAspectWarning(g, dim.w, dim.h)
@@ -1441,6 +1445,7 @@ ApplyExposure(g, all) {
 
 RefreshTimeline(g) {
     if IsTimesheetMode(g) {
+        DeduplicateTimesheetCells()
         total := GetTimesheetTotalFrames()
         fps := RefreshTimelineRaw(g)
         dur := total / fps
@@ -2821,6 +2826,7 @@ ShowTimesheetSetup(mainGui) {
         . "- When Timesheet mode is enabled, output is composited per frame by layer order.")
 
     ts.tabs.UseTab()
+    ts.btnEditGrid := ts.AddButton("x720 y490 w130 h28", "Edit By Time Sheet")
     ts.btnClose := ts.AddButton("x860 y490 w120 h28", "Close")
 
     ts.lv.OnEvent("Click", (lv, row) => LoadTimesheetEditorFromRows(ts))
@@ -2840,6 +2846,7 @@ ShowTimesheetSetup(mainGui) {
     ts.btnFillAll.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), FillMissingTimesheetEnds(ts)))
     ts.btnLinkDup.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), LinkedDuplicateTimesheetRows(ts)))
     ts.btnPreview.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), ShowTimesheetPreview(ts)))
+    ts.btnEditGrid.OnEvent("Click", (*) => (CommitPendingTimesheetFields(ts), ShowTimesheetEditGrid(ts)))
     ts.OnEvent("Close", (*) => CloseTimesheetSetup(ts))
     ts.btnClose.OnEvent("Click", (*) => CloseTimesheetSetup(ts))
 
@@ -3305,6 +3312,8 @@ ApplyTimesheetEditorToSelected(ts, useOnly := false, applyDropdowns := true, app
                 item.tsStartFrame := startFrame
                 if item.tsEndFrame < item.tsStartFrame
                     item.tsEndFrame := item.tsStartFrame
+                if item.tsCell = ""
+                    item.tsCell := GetNextCellForLayer(item.tsLayer)
             }
         } else {
             if applyDropdowns {
@@ -3716,4 +3725,620 @@ LoadProjectFromPath(g, path) {
     } catch {
         MsgBox "Failed to load project file.", "Error", "IconX"
     }
+}
+
+; ============================================================
+; TIMESHEET — Edit Grid (Table)
+; ============================================================
+
+GetNextCellForLayer(layer) {
+    used := []
+    for item in _imageList {
+        EnsureTimesheetFields(item)
+        if item.tsEnabled && item.tsLayer = layer && item.tsCell ~= "^\d+$"
+            used.Push(Integer(item.tsCell))
+    }
+    cell := 1
+    loop {
+        found := false
+        for n in used {
+            if n = cell {
+                found := true
+                break
+            }
+        }
+        if !found
+            return cell
+        cell += 1
+    }
+}
+
+AutoAssignTimesheetCells() {
+    layers := Map()
+    for item in _imageList {
+        EnsureTimesheetFields(item)
+        if !item.tsEnabled
+            continue
+        l := item.tsLayer
+        if !layers.Has(l)
+            layers[l] := []
+        layers[l].Push(item)
+    }
+    for l, items in layers {
+        Loop items.Length {
+            swapped := false
+            Loop items.Length - 1 {
+                a := items[A_Index]
+                b := items[A_Index + 1]
+                if a.tsStartFrame > b.tsStartFrame {
+                    tmp := items[A_Index]
+                    items[A_Index] := items[A_Index + 1]
+                    items[A_Index + 1] := tmp
+                    swapped := true
+                }
+            }
+            if !swapped
+                break
+        }
+        cell := 1
+        for item in items
+            item.tsCell := cell++
+    }
+}
+
+DeduplicateTimesheetCells() {
+    layers := Map()
+    for idx, item in _imageList {
+        EnsureTimesheetFields(item)
+        if !item.tsEnabled || item.type != "image"
+            continue
+        l := item.tsLayer
+        if !layers.Has(l)
+            layers[l] := []
+        layers[l].Push({idx: idx, item: item})
+    }
+    for l, items in layers {
+        cellGroups := Map()
+        for entry in items {
+            cell := Trim(String(entry.item.tsCell))
+            if cell = "" || !(cell ~= "^\d+$")
+                continue
+            if !cellGroups.Has(cell)
+                cellGroups[cell] := []
+            cellGroups[cell].Push(entry)
+        }
+        for cell, entries in cellGroups {
+            if entries.Length <= 1
+                continue
+            groups := Map()
+            for entry in entries {
+                g := Trim(String(entry.item.linkGroup))
+                if !groups.Has(g)
+                    groups[g] := 0
+                groups[g] += 1
+            }
+            bestGroup := ""
+            bestCount := 0
+            for g, cnt in groups {
+                if cnt > bestCount {
+                    bestCount := cnt
+                    bestGroup := g
+                }
+            }
+            for entry in entries {
+                g := Trim(String(entry.item.linkGroup))
+                if g != bestGroup {
+                    entry.item.tsCell := GetNextCellForLayer(l)
+                }
+            }
+            if bestGroup = "" && entries.Length > 1 {
+                for i, entry in entries {
+                    if i = 1
+                        continue
+                    entry.item.tsCell := GetNextCellForLayer(l)
+                }
+            }
+        }
+    }
+}
+
+GetActiveTimesheetLayers() {
+    seen := Map()
+    for item in _imageList {
+        EnsureTimesheetFields(item)
+        if item.tsEnabled {
+            l := item.tsLayer
+            if !seen.Has(l)
+                seen[l] := true
+        }
+    }
+    layers := []
+    for l, _ in seen
+        layers.Push(l)
+    Loop layers.Length {
+        swapped := false
+        Loop layers.Length - 1 {
+            ra := GetTimesheetLayerRank(layers[A_Index])
+            rb := GetTimesheetLayerRank(layers[A_Index + 1])
+            if ra > rb {
+                tmp := layers[A_Index]
+                layers[A_Index] := layers[A_Index + 1]
+                layers[A_Index + 1] := tmp
+                swapped := true
+            }
+        }
+        if !swapped
+            break
+    }
+    return layers
+}
+
+GetCellText(frame, layer) {
+    for item in _imageList {
+        EnsureTimesheetFields(item)
+        if item.tsEnabled && item.tsLayer = layer && item.tsStartFrame <= frame && frame <= item.tsEndFrame {
+            if frame = item.tsStartFrame {
+                if item.tsCell ~= "^\d+$"
+                    return "•" item.tsCell
+                return "X"
+            }
+            return "│"
+        }
+    }
+    return "~"
+}
+
+ShowTimesheetEditGrid(ts) {
+    global _imageList
+    eg := Gui("+Owner" ts.Hwnd, "Timesheet Edit Grid")
+    eg.SetFont("s9", "Segoe UI")
+    eg.MarginX := 10
+    eg.MarginY := 10
+    eg.ts := ts
+
+    layers := GetActiveTimesheetLayers()
+    eg.layers := layers
+
+    totalW := Max(420, 60 + layers.Length * 64)
+    if totalW > 1200
+        totalW := 1200
+
+    eg.AddText("x10 y10 c808080", "Edit cell values directly.  •N=numbered, X=keyframe, │=hold, ~=empty")
+
+    eg.edit := eg.AddEdit("x10 y28 w" (totalW - 20) " h260 +HScroll +VScroll +WantTab", "")
+
+    eg.edit.Value := BuildTimesheetTableText(layers)
+
+    btnRow1 := 298
+    eg.btnMinus := eg.AddButton("x10 y" btnRow1 " w28 h24", "-")
+    eg.btnPlus := eg.AddButton("x42 y" btnRow1 " w28 h24", "+")
+    eg.btnKey := eg.AddButton("x96 y" btnRow1 " w28 h24", "X")
+
+    btnRow2 := btnRow1 + 32
+    eg.btnAuto := eg.AddButton("x10 y" btnRow2 " w130 h26", "Auto-Adjust")
+    eg.btnSave := eg.AddButton("x150 y" btnRow2 " w110 h26", "Save && Sync")
+    eg.btnHelp := eg.AddButton("x260 y" btnRow2 " w28 h24", "?")
+    eg.btnClose := eg.AddButton("x" (totalW - 126) " y" btnRow2 " w96 h26", "Close")
+
+    eg.btnMinus.OnEvent("Click", (*) => RemoveEditGridFrame(eg))
+    eg.btnPlus.OnEvent("Click", (*) => AddEditGridFrame(eg))
+    eg.btnKey.OnEvent("Click", (*) => ApplyMarkerToCell(eg, "X"))
+    eg.btnAuto.OnEvent("Click", (*) => SmartAutoAdjustEditGrid(eg))
+    eg.btnSave.OnEvent("Click", (*) => SaveEditGrid(eg))
+    eg.btnHelp.OnEvent("Click", (*) => ShowEditGridHelp())
+    eg.btnClose.OnEvent("Click", (*) => eg.Destroy())
+
+    eg.Show("w" totalW " h" (btnRow2 + 50))
+}
+
+BuildTimesheetTableText(layers) {
+    if layers.Length = 0
+        return " Fr"
+    total := GetTimesheetTotalFrames()
+    fw := Max(2, StrLen(total))
+    hdr := SubStr("     ", 1, fw - 2) "Fr"
+    sep := ""
+    Loop fw
+        sep .= "-"
+    for l in layers {
+        hdr .= " | " PadCenter(l, 5)
+        sep .= "-+------"
+    }
+    text := hdr "`n" sep "`n"
+    Loop total {
+        f := A_Index
+        line := Format("{:" fw "d}", f)
+        for l in layers
+            line .= " | " PadCenter(GetCellText(f, l), 5)
+        text .= line "`n"
+    }
+    return RTrim(text, "`n")
+}
+
+PadCenter(str, width) {
+    len := StrLen(str)
+    if len >= width
+        return str
+    pad := width - len
+    left := pad // 2
+    right := pad - left
+    result := str
+    Loop right
+        result .= " "
+    Loop left
+        result := " " . result
+    return result
+}
+
+ApplyMarkerToCell(eg, marker) {
+    layers := eg.layers
+    if layers.Length = 0
+        return
+    text := eg.edit.Value
+    if Trim(text) = ""
+        return
+
+    lines := StrSplit(text, "`n")
+    if lines.Length < 3
+        return
+
+    try {
+        hEdit := eg.edit.Hwnd
+        sel := SendMessage(0x00B0, 0, 0, hEdit)
+        start := sel & 0xFFFF
+        totalLen := StrLen(text)
+        if start > totalLen
+            return
+
+        lineIndex := SendMessage(0x00A9, start, 0, hEdit)
+        if lineIndex < 2 || lineIndex >= lines.Length
+            return
+
+        line := lines[lineIndex + 1]
+        cellIdx := 0
+        pipePos := 0
+        lineStart := SendMessage(0x00BB, lineIndex, 0, hEdit)
+        while (pipePos := InStr(line, "|", , pipePos + 1)) {
+            col := start - lineStart
+            if col < pipePos - 1
+                break
+            cellIdx++
+        }
+        if cellIdx <= 0 || cellIdx > layers.Length
+            return
+
+        parts := StrSplit(line, "|")
+        if cellIdx > parts.Length - 1
+            return
+
+        parts[cellIdx + 1] := " " PadCenter(marker, 5) " "
+
+        newLine := ""
+        for i, p in parts {
+            if i > 1
+                newLine .= "|"
+            newLine .= p
+        }
+        lines[lineIndex + 1] := newLine
+        newText := lines[1]
+        Loop lines.Length - 1
+            newText .= "`n" . lines[A_Index + 1]
+        eg.edit.Value := newText
+
+        SendMessage(0x00B1, start, start, hEdit)
+    }
+}
+
+AddEditGridFrame(eg) {
+    text := eg.edit.Value
+    lines := StrSplit(text, "`n")
+    total := lines.Length - 2
+
+    lastParts := ""
+    if total >= 1 {
+        lastLine := lines[lines.Length]
+        lastParts := StrSplit(lastLine, "|")
+    }
+
+    line := Format("{:3d}", total + 1)
+    for li, l in eg.layers {
+        if IsObject(lastParts) && li < lastParts.Length {
+            lastVal := Trim(lastParts[li + 1])
+            if lastVal = "X" || lastVal = "~"
+                val := "~"
+            else
+                val := "│"
+        } else {
+            val := "~"
+        }
+        line .= " | " PadCenter(val, 5)
+    }
+    text .= "`n" . line
+    eg.edit.Value := text
+    RenumberGridFrames(eg)
+}
+
+RemoveEditGridFrame(eg) {
+    text := eg.edit.Value
+    lines := StrSplit(text, "`n")
+    if lines.Length <= 3
+        return
+    lines.RemoveAt(lines.Length)
+    newText := lines[1]
+    Loop lines.Length - 1
+        newText .= "`n" . lines[A_Index + 1]
+    eg.edit.Value := newText
+    RenumberGridFrames(eg)
+}
+
+RenumberGridFrames(eg) {
+    text := eg.edit.Value
+    lines := StrSplit(text, "`n", "`r")
+    if lines.Length < 3
+        return
+
+    dataParts := []
+    for i, line in lines {
+        if i <= 2
+            continue
+        l := Trim(line)
+        if l = ""
+            continue
+        parts := StrSplit(l, "|")
+        if parts.Length < 2
+            continue
+        dataParts.Push(parts)
+    }
+    if dataParts.Length = 0
+        return
+
+    fw := Max(2, StrLen(dataParts.Length))
+    layers := eg.layers
+    hdr := SubStr("     ", 1, fw - 2) "Fr"
+    sep := ""
+    Loop fw
+        sep .= "-"
+    for l in layers {
+        hdr .= " | " PadCenter(l, 5)
+        sep .= "-+------"
+    }
+    newText := hdr "`n" sep
+    seq := 1
+    for parts in dataParts {
+        parts[1] := Format("{:" fw "d} ", seq)
+        newLine := ""
+        for j, p in parts {
+            if j > 1
+                newLine .= "|"
+            newLine .= p
+        }
+        newText .= "`n" . newLine
+        seq++
+    }
+    eg.edit.Value := newText
+    SendMessage(0x00B1, StrLen(newText), StrLen(newText), eg.edit.Hwnd)
+}
+
+ParseTimesheetGrid(text, layers) {
+    lines := StrSplit(text, "`n", "`r")
+    grid := []
+    for i, line in lines {
+        if i <= 2
+            continue
+        line := Trim(line)
+        if line = ""
+            continue
+        parts := StrSplit(line, "|")
+        if parts.Length < 2
+            continue
+        try
+            frame := Integer(Trim(parts[1]))
+        if !frame
+            continue
+        cells := []
+        for j, part in parts {
+            if j = 1
+                continue
+            cellVal := Trim(part)
+            if cellVal = "|"
+                cellVal := "│"
+            cells.Push(cellVal)
+        }
+        grid.Push({frame: frame, cells: cells})
+    }
+    return grid
+}
+
+SmartAutoAdjustEditGrid(eg) {
+    text := eg.edit.Value
+    layers := eg.layers
+    if text = ""
+        return
+
+    lines := StrSplit(text, "`n", "`r")
+    data := []
+    for i, line in lines {
+        if i <= 2
+            continue
+        line := Trim(line)
+        if line = ""
+            continue
+        parts := StrSplit(line, "|")
+        if parts.Length < 2
+            continue
+        try
+            frame := Integer(Trim(parts[1]))
+        if !frame
+            continue
+        row := []
+        for j, part in parts {
+            if j = 1
+                continue
+            row.Push(Trim(part))
+        }
+        data.Push({frame: frame, cells: row})
+    }
+
+    if data.Length = 0
+        return
+
+    fw := Max(2, StrLen(data.Length))
+    hdr := SubStr("     ", 1, fw - 2) "Fr"
+    sep := ""
+    Loop fw
+        sep .= "-"
+    for l in layers {
+        hdr .= " | " PadCenter(l, 5)
+        sep .= "-+------"
+    }
+    newText := hdr "`n" sep
+
+    seq := 1
+    for ei, entry in data {
+        line := Format("{:" fw "d}", seq)
+        for li, l in layers {
+            val := entry.cells.Length >= li ? entry.cells[li] : "~"
+            if val = "|"
+                val := "│"
+            if val = "" || val = "~" || val = "│" {
+                if ei > 1 {
+                    above := data[ei-1].cells.Length >= li ? data[ei-1].cells[li] : "~"
+                    if above = "|"
+                        above := "│"
+                    if above = "X" || above = "~" || above = ""
+                        val := "~"
+                    else
+                        val := "│"
+                } else {
+                    val := "~"
+                }
+            }
+            line .= " | " PadCenter(val, 5)
+        }
+        newText .= "`n" . line
+        seq++
+    }
+
+    eg.edit.Value := newText
+}
+
+RestoreItemsFromGrid(grid, layers) {
+    global _imageList
+
+    regular := []
+    for item in _imageList {
+        if item.type = "image" && item.tsEnabled
+            continue
+        regular.Push(item)
+    }
+
+    newItems := []
+    for li, layer in layers {
+        startFrame := 0
+        cellNum := ""
+        for gi, entry in grid {
+            val := entry.cells.Length >= li ? entry.cells[li] : "~"
+            if val = "|"
+                val := "│"
+            if startFrame = 0 {
+                if val = "~"
+                    continue
+                startFrame := entry.frame
+                if SubStr(val, 1, 1) = "•"
+                    cellNum := SubStr(val, 2)
+                else
+                    cellNum := ""
+                continue
+            }
+            if val = "~" || (val = "X" && entry.frame > startFrame) || (SubStr(val, 1, 1) = "•") {
+                endFrame := entry.frame - 1
+                item := {name: "TS-frame" startFrame, type: "image", exposure: 1, note: "", path: ""
+                    , tsEnabled: true, tsLayer: layer, tsCell: cellNum, tsStartFrame: startFrame, tsEndFrame: endFrame, linkGroup: ""}
+                EnsureTimesheetFields(item)
+                newItems.Push(item)
+                if val = "~" {
+                    startFrame := 0
+                    cellNum := ""
+                } else {
+                    startFrame := entry.frame
+                    if SubStr(val, 1, 1) = "•"
+                        cellNum := SubStr(val, 2)
+                    else
+                        cellNum := ""
+                }
+                continue
+            }
+        }
+        if startFrame > 0 && grid.Length > 0 {
+            item := {name: "TS-frame" startFrame, type: "image", exposure: 1, note: "", path: ""
+                , tsEnabled: true, tsLayer: layer, tsCell: cellNum, tsStartFrame: startFrame, tsEndFrame: grid[grid.Length].frame, linkGroup: ""}
+            EnsureTimesheetFields(item)
+            newItems.Push(item)
+        }
+    }
+
+    _imageList := []
+    for item in regular
+        _imageList.Push(item)
+    for item in newItems
+        _imageList.Push(item)
+}
+
+SaveEditGrid(eg) {
+    global _imageList
+    layers := eg.layers
+    text := eg.edit.Value
+    if Trim(text) = ""
+        return
+
+    grid := ParseTimesheetGrid(text, layers)
+    if grid.Length = 0 {
+        MsgBox "Could not parse the grid text.", "Parse Error", "Icon!"
+        return
+    }
+
+    if grid[1].cells.Length < layers.Length {
+        MsgBox "Number of columns in text (" grid[1].cells.Length ") doesn't match layers (" layers.Length ").", "Parse Error", "Icon!"
+        return
+    }
+
+    backup := _imageList.Clone()
+    PushUndoState(eg.ts.mainGui)
+    RestoreItemsFromGrid(grid, layers)
+
+    dup := FindDuplicateTimesheetCell()
+    if IsObject(dup) {
+        _imageList := backup
+        eg.edit.Value := BuildTimesheetTableText(layers)
+        MsgBox "Duplicate cell " dup.cell " in layer " dup.layer ". Changes reverted.", "Timesheet Error", "Icon!"
+        return
+    }
+
+    SyncListViewToModel(eg.ts.mainGui)
+    ReloadTimesheetList(eg.ts)
+    RefreshTimeline(eg.ts.mainGui)
+    UpdatePreview(eg.ts.mainGui)
+
+    eg.edit.Value := BuildTimesheetTableText(layers)
+}
+
+ShowEditGridHelp() {
+    MsgBox(
+        "TIMESHEET EDIT GRID HELP`n`n"
+        . "Edit the table text directly:`n"
+        . "  •1, •2 ...  Cell number keyframe`n"
+        . "  X           Keyframe (no number)`n"
+        . "  │ or |      Hold / continuation (type | auto-converts to │)`n"
+        . "  ~           Empty (no item)`n`n"
+        . "Buttons:`n"
+        . "  [X] Insert X at cursor cell`n"
+        . "  [+] Add a frame at the end (value from last frame: •N/│ → │, X/~ → ~)`n"
+        . "  [-] Remove the last frame`n`n"
+        . "Auto-Adjust: re-aligns text, fills empty cells from above, renumbers frames`n"
+        . "  •N, N, │ above → │ below     X, ~, empty above → ~ below`n`n"
+        . "Save && Sync: reconstructs items from the table text`n"
+        . "Frame numbers are always kept sequential (1, 2, 3, ...)`n"
+        . "Changes are tracked with Undo (Ctrl+Z in main window)",
+        "Edit Grid Help", "Iconi"
+    )
 }

@@ -127,6 +127,46 @@ Preview symbols:
 
 ---
 
+## 📝 Edit Grid
+
+Click `Edit Grid` to open a text-area table editor for the timesheet.
+
+```
+ Fr |  A    | B_shita |   B    | B_ue
+----+-------+---------+-------+-------
+  1 |  •1   |   •1    |  │    |  │
+  2 |  │    |   │     |  │    |  │
+  3 |  X    |   │     |  │    |  │
+  4 |  ~    |   │     |  │    |  │
+```
+
+**Editing:**
+
+- Type `•1`, `•2` ... — numbered keyframe (cell number)
+- Type `X` — keyframe (no number)
+- Type `│` or `|` — hold / continuation
+- Type `~` — empty (no item)
+- Type `|` (pipe) is auto-converted to `│` on save and auto-adjust
+- Undo is available via `Ctrl+Z` in the main window
+
+**Buttons:**
+
+| Button | Function |
+| ------ | -------- |
+| `[–]` | Remove last frame |
+| `[+]` | Add a frame (value from last frame: •N/│ → │, X/~ → ~) |
+| `[X]` | Replace cell at cursor with `X` |
+| `[Auto-Adjust]` | Re-align columns, renumber frames, fill non-keyframe cells from above |
+| `[Save && Sync]` | Reconstruct items from table text (reverts on duplicate error) |
+
+**Smart fill (Auto-Adjust):** non-keyframe cells (`~`, `│`, `|`, empty) are replaced based on the cell above:
+- `•N`, `N`, `│` above → `│` (hold continues)
+- `X`, `~`, empty above → `~` (still empty)
+
+**Frame numbering** is always kept sequential: `[–]`, `[+]`, and `[Auto-Adjust]` all renumber frames 1, 2, 3, ...
+
+---
+
 # 📤 Export Notes
 
 * Contact sheet export uses `contain` fitting
