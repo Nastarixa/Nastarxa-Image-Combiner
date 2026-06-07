@@ -4140,16 +4140,23 @@ SmartAutoAdjustEditGrid(eg) {
             if val = "|"
                 val := "│"
             if val = "" || val = "~" || val = "│" {
-                if ei > 1 {
-                    above := data[ei-1].cells.Length >= li ? data[ei-1].cells[li] : "~"
-                    if above = "|"
-                        above := "│"
-                    if above = "X" || above = "~" || above = ""
-                        val := "~"
-                    else
-                        val := "│"
-                } else {
+                if data.Length = 1 {
                     val := "~"
+                } else if ei = 1 {
+                    belowRaw := data[2].cells.Length >= li ? data[2].cells[li] : "~"
+                    below := belowRaw = "|" ? "│" : belowRaw
+                    val := below = "│" ? "│" : "~"
+                } else if ei = data.Length {
+                    aboveRaw := data[ei-1].cells.Length >= li ? data[ei-1].cells[li] : "~"
+                    above := aboveRaw = "|" ? "│" : aboveRaw
+                    val := above = "│" ? "│" : "~"
+                } else {
+                    aboveRaw := data[ei-1].cells.Length >= li ? data[ei-1].cells[li] : "~"
+                    belowRaw := data[ei+1].cells.Length >= li ? data[ei+1].cells[li] : "~"
+                    above := aboveRaw = "|" ? "│" : aboveRaw
+                    below := belowRaw = "|" ? "│" : belowRaw
+                    if above = below
+                        val := above
                 }
             }
             line .= " | " PadCenter(val, 5)
